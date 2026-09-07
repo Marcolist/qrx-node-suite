@@ -179,6 +179,13 @@ func run() error {
 	}
 
 	bus := events.NewBus(64)
+	// Bounds GET /api/v1/events (unauthenticated by design) to a fixed
+	// number of concurrent SSE subscribers -- see events.Bus.MaxSubscribers
+	// and ServeSSE's doc comment (F10 fix, external security audit). Well
+	// above any single legitimate dashboard's needs (normally one tab, at
+	// most a handful across devices/mobile pairing) while still bounding
+	// worst case.
+	bus.MaxSubscribers = 256
 
 	svcManager := platform.New()
 	restartQRX := func(ctx context.Context) error { return svcManager.Restart(ctx, "qrxd.service") }
@@ -307,7 +314,29 @@ func run() error {
 	mux.Handle("/health", NewLoggingMiddleware(logger, apiMux))
 	mux.Handle("/", dashboardHandler(cfg.DashboardDir, storeFor(componentsBaseDir, "dashboard")))
 
-	srv := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
+	srv := &http.Server{
+		Addr:    cfg.ListenAddr,
+		Handler: mux,
+		// ReadHeaderTimeout/ReadTimeout bound how long a client gets to
+		// send a request at all (slowloris-style attacks: opening a
+		// connection and trickling bytes to hold a goroutine/fd open
+		// indefinitely) -- safe to apply to every route, including
+		// GET /api/v1/events, since they only ever cover reading the
+		// incoming request, never how long this server can take to write
+		// a response. WriteTimeout is deliberately left unset: it covers
+		// the entire response lifetime including anything already
+		// hijacked/streamed, and GET /api/v1/events (events.Bus.ServeSSE)
+		// intentionally keeps its connection open indefinitely to stream
+		// events -- a global WriteTimeout would forcibly cut every SSE
+		// client off after that duration. That endpoint's own resource
+		// bound is events.Bus.MaxSubscribers instead (see above). IdleTimeout
+		// bounds a kept-alive connection sitting idle between requests
+		// (not an actively-streaming SSE response, which isn't idle).
+		// F10 fix, external security audit.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

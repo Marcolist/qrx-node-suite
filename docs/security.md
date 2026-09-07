@@ -109,13 +109,27 @@ appended to an already-large change.
   on. Deferred: closing this properly means deciding on a security posture
   (TLS, a Host/Origin allowlist for LAN bind, or authenticating read
   endpoints too) rather than a narrow bug fix.
-- **F10 -- resource limits.** Confirmed: no request body size limits, no
-  per-request timeouts beyond `http.Server`'s zero-value (no) defaults, no
-  cap on concurrent SSE connections, and `Policy.Locked` (`agent/updates`)
-  is a persisted boolean, not a mutex -- it prevents a *second admin
-  request* from starting a concurrent install, but doesn't serialize
-  concurrent goroutines within this process. Deferred as a general
-  hardening pass rather than one fix.
+- **F10 -- resource limits (partially fixed).** Confirmed four distinct
+  issues under this finding. **Fixed:** no request body size limits
+  (`decodeJSON` now wraps every body in `http.MaxBytesReader`, 64 KiB --
+  the only place any handler in this package reads a request body at all);
+  no read-side per-request timeouts (`http.Server`'s
+  `ReadHeaderTimeout`/`ReadTimeout`/`IdleTimeout` now set, bounding
+  slowloris-style attacks and idle keep-alive connections; `WriteTimeout`
+  deliberately left unset -- it covers the entire response including an
+  intentionally long-lived stream, and would forcibly cut off
+  `GET /api/v1/events` after that duration); no cap on concurrent SSE
+  connections (`events.Bus.MaxSubscribers`, checked and registered
+  atomically under the same lock in the new `TrySubscribe`, refuses past
+  256 concurrent subscribers with a `503`/`Retry-After` rather than
+  accepting an unbounded number of open connections). **Still deferred:**
+  `Policy.Locked` (`agent/updates`) is a persisted boolean, not a mutex --
+  it prevents a *second admin request* from starting a concurrent install,
+  but doesn't serialize concurrent goroutines within this process; closing
+  that needs a real in-process lock around `Manager.Install`/`Rollback`,
+  which is a large enough change to the update-execution path to warrant
+  its own review rather than a patch bundled with the resource-exhaustion
+  fixes above.
 - **F12 -- Core service control lacks least privilege.** Confirmed:
   `agent/platform.New()` returns a `Systemd` service manager with
   `UseSudo: false` by default, so `qrxd.service` start/stop/restart calls
