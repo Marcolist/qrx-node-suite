@@ -72,7 +72,16 @@ per-artifact signature) must pass before a downloaded file is staged.
 `agent/updates/sources.Source`, implemented by:
 
 - `GitHubReleaseSource` -- `stable` is the repo's latest release; other
-  channels resolve to the newest release tagged `<channel>-...`.
+  channels resolve to the newest release tagged `<channel>-...`. Asks for a
+  release asset named `manifest-linux-<GOARCH>.json`
+  (`cmd/agentd/sources.go`'s `buildUpdateSource`), not a single shared
+  `manifest.json`: the `agent` component's artifact is a raw binary
+  (`components.Agent.Extract`), so it has to match the architecture this
+  process is actually running on, and the manifest format itself
+  (above) has no per-architecture field of its own -- see
+  `.github/workflows/release.yml`'s "Build/Sign OTA update manifests"
+  steps, which publish one manifest per architecture this project ships
+  for (currently `amd64`, `arm64`).
 - `StaticManifestSource` -- a fixed URL template (`.../manifests/{channel}.json`).
 - `LocalFileSource` -- offline installs (`docs/updates.md#offline-installation`).
 - `DevelopmentSource` -- fixed in-memory manifests/artifacts, for tests only.
@@ -156,12 +165,48 @@ in this codebase -- see `agent/adapters/README.md` and
 meaningfully health-check code it isn't executing yet, so
 `components.SelfBinary` components skip synchronous
 STOP/START/HEALTH CHECK/COMMIT: `Install` stages and atomically promotes,
-then returns `PendingRestart: true`. `cmd/agentd` is responsible for
-exiting so the process supervisor (systemd `Restart=always`, see
-`docs/deployment.md`) restarts the process onto the new `current` binary;
-the restarted process calls `Manager.ResumeSelfUpdate`, which runs the real
-health check now that the new code is actually running, then commits or
-rolls back the store pointers.
+then returns `PendingRestart: true`.
+
+Making that promotion actually take effect needs two things working
+together, both fixed by an external re-review (R05) after the original
+design shipped only the store-side half:
+
+1. **`${QRX_PREFIX}/bin/agentd` has to resolve to whatever the store
+   promotes.** `Store.Promote()` only ever flips a symlink *inside* the OTA
+   store (`<DataDir>/components/agent/current -> releases/<version>`) --
+   it has no way to touch systemd's `ExecStart`, which is a fixed path.
+   `install.sh`'s `bootstrap_agent_ota_store()` closes that gap once, at
+   install time: it lays the initial binary into the OTA store's own
+   layout (instead of copying it straight to `${QRX_PREFIX}/bin/agentd`)
+   and makes `${QRX_PREFIX}/bin/agentd` a symlink into the store's
+   `current` release. `Store.Promote()`'s existing atomic rename of
+   `current` then transitively repoints what `ExecStart` execs, forever
+   after, with no further installer involvement and no systemd sandbox
+   changes -- only the *inner* `current` symlink, inside `QRX_DATA_DIR`
+   (already in `ReadWritePaths`), ever changes again.
+2. **The process has to actually exit for a restart to happen at all.**
+   `Deps.RequestSelfRestart` (`agent/api`) is called by the `updates/install`
+   and `updates/rollback` HTTP handlers whenever a result reports
+   `PendingRestart: true`, after the response is written so a polling
+   caller still sees it. `cmd/agentd` wires this to the same graceful-
+   shutdown path SIGTERM already uses (cancel the top-level context ->
+   `srv.Shutdown` -> `run()` returns -> process exits 0), which is what
+   lets systemd's `Restart=always` start a fresh process at all. Before
+   this existed, nothing ever read `PendingRestart`: a self-update could
+   verify, stage, and promote a new binary correctly and never actually
+   run it.
+
+Either half missing is enough to make self-update a no-op that reports
+success -- see `docs/security.md` for how the external re-review found
+this. The restarted process calls `Manager.ResumeSelfUpdate`, which runs
+the real health check now that the new code is actually running, then
+commits or rolls back the store pointers; if it rolled back, `cmd/agentd`
+exits again (`selfUpdateRollbackRequiresRestart`, scoped to `agent` only --
+an `adapter_*` rollback is just a version-tracking pointer change, since
+adapter code is compiled into this same running binary, so nothing
+restarting would accomplish) so the *next* restart lands on the reverted
+binary rather than continuing to run the one that just failed its health
+check.
 
 **Crash-loop guard**: `ResumeSelfUpdate` alone only protects against "starts,
 but unhealthy" -- it can't run at all if the new binary crashes before it

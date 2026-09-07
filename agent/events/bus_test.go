@@ -76,3 +76,56 @@ func TestSubscriberCount(t *testing.T) {
 		t.Fatalf("SubscriberCount() = %d, want 1", bus.SubscriberCount())
 	}
 }
+
+// TestTrySubscribeRespectsMaxSubscribers is the F10 fix (external security
+// audit: "no cap on concurrent SSE connections") -- TrySubscribe must
+// refuse once MaxSubscribers are already registered, and start accepting
+// again once one unsubscribes.
+func TestTrySubscribeRespectsMaxSubscribers(t *testing.T) {
+	bus := events.NewBus(4)
+	bus.MaxSubscribers = 2
+
+	id1, _, ok := bus.TrySubscribe()
+	if !ok {
+		t.Fatal("1st TrySubscribe should succeed (0 of 2)")
+	}
+	if _, _, ok := bus.TrySubscribe(); !ok {
+		t.Fatal("2nd TrySubscribe should succeed (1 of 2)")
+	}
+	if _, _, ok := bus.TrySubscribe(); ok {
+		t.Fatal("3rd TrySubscribe should be refused -- MaxSubscribers (2) already registered")
+	}
+	if bus.SubscriberCount() != 2 {
+		t.Fatalf("SubscriberCount() = %d, want 2 (the refused attempt must not register)", bus.SubscriberCount())
+	}
+
+	bus.Unsubscribe(id1)
+	if _, _, ok := bus.TrySubscribe(); !ok {
+		t.Fatal("TrySubscribe should succeed again after a slot freed up")
+	}
+}
+
+// TestSubscribeIgnoresMaxSubscribers confirms MaxSubscribers only bounds
+// TrySubscribe (the externally-reachable SSE HTTP path), never Subscribe
+// itself (in-process consumers: guardian, alerts) -- see MaxSubscribers'
+// doc comment for why.
+func TestSubscribeIgnoresMaxSubscribers(t *testing.T) {
+	bus := events.NewBus(4)
+	bus.MaxSubscribers = 1
+
+	bus.Subscribe()
+	bus.Subscribe()
+	bus.Subscribe()
+	if bus.SubscriberCount() != 3 {
+		t.Fatalf("SubscriberCount() = %d, want 3 -- Subscribe must not be capped by MaxSubscribers", bus.SubscriberCount())
+	}
+}
+
+func TestMaxSubscribersZeroMeansUnlimited(t *testing.T) {
+	bus := events.NewBus(4)
+	for i := 0; i < 50; i++ {
+		if _, _, ok := bus.TrySubscribe(); !ok {
+			t.Fatalf("TrySubscribe refused at subscriber %d with MaxSubscribers unset (0) -- should be unlimited", i)
+		}
+	}
+}

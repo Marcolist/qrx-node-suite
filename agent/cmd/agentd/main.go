@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -68,6 +69,9 @@ func run() error {
 	configPath := flag.String("config", os.Getenv("QRX_AGENT_CONFIG"), "path to a JSON config file (optional -- Mock mode works with none)")
 	flag.Parse()
 
+	if err := requireConfigPathExists(*configPath); err != nil {
+		return err
+	}
 	cfg := config.Default()
 	if *configPath != "" {
 		if err := config.LoadInto(*configPath, &cfg); err != nil {
@@ -175,8 +179,26 @@ func run() error {
 	}
 
 	bus := events.NewBus(64)
+	// Bounds GET /api/v1/events (unauthenticated by design) to a fixed
+	// number of concurrent SSE subscribers -- see events.Bus.MaxSubscribers
+	// and ServeSSE's doc comment (F10 fix, external security audit). Well
+	// above any single legitimate dashboard's needs (normally one tab, at
+	// most a handful across devices/mobile pairing) while still bounding
+	// worst case.
+	bus.MaxSubscribers = 256
 
 	svcManager := platform.New()
+	// UseSudo only exists on the Linux implementation (agent/platform.
+	// Systemd, a build-tagged file this package -- untagged -- can't
+	// reference by concrete type without breaking non-Linux builds) --
+	// an anonymous interface assertion against SetUseSudo instead, a
+	// no-op on any ServiceManager that doesn't have it (e.g. Unsupported
+	// on macOS/Windows, where there is no sudoers rule to use either). See
+	// config.Config.QRXCoreServiceUseSudo's doc comment (F12 fix, external
+	// security audit).
+	if sudoable, ok := svcManager.(interface{ SetUseSudo(bool) }); ok {
+		sudoable.SetUseSudo(cfg.QRXCoreServiceUseSudo)
+	}
 	restartQRX := func(ctx context.Context) error { return svcManager.Restart(ctx, "qrxd.service") }
 	guardianRestart := func(ctx context.Context, reason string) error { return restartQRX(ctx) }
 
@@ -251,16 +273,44 @@ func run() error {
 		if rec != nil {
 			logger.Info("resumed pending self-update", "component", component, "status", rec.Status, "to_version", rec.ToVersion)
 		}
+		if selfUpdateRollbackRequiresRestart(component, rec) {
+			return fmt.Errorf("agent self-update health check failed and was rolled back to %s -- exiting so the process supervisor restarts onto the reverted binary (this process is still running the unhealthy one)", rec.FromVersion)
+		}
 	}
 
 	sysCollector := monitoring.New()
+
+	// requestSelfRestart triggers the same graceful shutdown a SIGTERM
+	// would (cancel ctx -> srv.Shutdown -> ListenAndServe returns ->
+	// run() returns nil -> process exits 0 -> systemd's Restart=always
+	// starts a fresh process, landing on whatever ${QRX_PREFIX}/bin/agentd
+	// now resolves to via its symlink chain into the OTA store's
+	// "current" release). Delayed slightly and run in its own goroutine
+	// so the HTTP handler that triggered this (POST /api/v1/updates/
+	// install or /updates/rollback, on PendingRestart) can finish writing
+	// its response to the client first -- an operator/dashboard polling
+	// that request should see "pending_restart: true" before the
+	// connection drops, not a connection reset instead of a response.
+	// sync.Once: Install and Rollback can each trigger this, and
+	// cancel() itself is idempotent, but there's no reason to spawn more
+	// than one pending shutdown.
+	var restartOnce sync.Once
+	requestSelfRestart := func() {
+		restartOnce.Do(func() {
+			logger.Info("self-restart requested after a self-binary update -- exiting shortly so the process supervisor restarts onto it")
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				cancel()
+			}()
+		})
+	}
 
 	deps := &api.Deps{
 		Cache: api.NewCache(), Bus: bus, Guardian: g, Registry: registry,
 		Updates: mgr, QRXCore: qrxCoreMgr, Policy: policy,
 		History: historyStore, Audit: auditStore, Alerts: alertStore, Settings: settingsStore,
 		VersionInfo: versionInfo, UpdateComponents: updateComponents, AdminToken: cfg.AdminToken,
-		RestartQRXService: restartQRX, Log: logger,
+		RestartQRXService: restartQRX, RequestSelfRestart: requestSelfRestart, Log: logger,
 	}
 
 	poller := &Poller{
@@ -275,7 +325,29 @@ func run() error {
 	mux.Handle("/health", NewLoggingMiddleware(logger, apiMux))
 	mux.Handle("/", dashboardHandler(cfg.DashboardDir, storeFor(componentsBaseDir, "dashboard")))
 
-	srv := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
+	srv := &http.Server{
+		Addr:    cfg.ListenAddr,
+		Handler: mux,
+		// ReadHeaderTimeout/ReadTimeout bound how long a client gets to
+		// send a request at all (slowloris-style attacks: opening a
+		// connection and trickling bytes to hold a goroutine/fd open
+		// indefinitely) -- safe to apply to every route, including
+		// GET /api/v1/events, since they only ever cover reading the
+		// incoming request, never how long this server can take to write
+		// a response. WriteTimeout is deliberately left unset: it covers
+		// the entire response lifetime including anything already
+		// hijacked/streamed, and GET /api/v1/events (events.Bus.ServeSSE)
+		// intentionally keeps its connection open indefinitely to stream
+		// events -- a global WriteTimeout would forcibly cut every SSE
+		// client off after that duration. That endpoint's own resource
+		// bound is events.Bus.MaxSubscribers instead (see above). IdleTimeout
+		// bounds a kept-alive connection sitting idle between requests
+		// (not an actively-streaming SSE response, which isn't idle).
+		// F10 fix, external security audit.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -288,6 +360,29 @@ func run() error {
 		return fmt.Errorf("http server: %w", err)
 	}
 	logger.Info("shutdown complete")
+	return nil
+}
+
+// requireConfigPathExists rejects an explicitly-given -config/
+// QRX_AGENT_CONFIG path that doesn't exist, before config.LoadInto ever
+// gets a chance to run. LoadInto's own contract ("no file at path ->
+// Default()'s values stand") is correct for the zero-config case -- no
+// path requested at all, which is how Mock-mode development is meant to
+// work -- but wrong for a caller that explicitly named a specific file:
+// path == "" (nothing requested) is not the same claim as "-config
+// /etc/qrx-node-suite/agent.json" (a specific file requested) failing to
+// exist, and treating a typo'd or missing path the same as "no config
+// wanted" meant a broken install could silently boot in Mock mode --
+// serving assumed/fake node data -- with no error anywhere. Returns nil
+// for an empty path (nothing to check) or a path that exists; a
+// descriptive error otherwise. (F13 fix, external security audit)
+func requireConfigPathExists(path string) error {
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("-config %s does not exist or is not readable -- refusing to silently start in Mock mode with defaults instead: %w", path, err)
+	}
 	return nil
 }
 
@@ -325,6 +420,25 @@ func parsePublicKey(b64 string) (ed25519.PublicKey, error) {
 // bootstrap-registering a version with no corresponding on-disk release
 // would defeat that fallback and break dashboard serving on every fresh
 // install.
+// selfUpdateRollbackRequiresRestart reports whether resuming a self-update
+// for component with the given history record requires exiting this
+// process so the process supervisor (systemd's Restart=always) starts a
+// fresh one that lands on the reverted binary.
+//
+// Scoped to component == "agent" only: adapter code (adapter_*) is
+// compiled into this same agentd binary (docs/architecture.md), so an
+// adapter-only rollback just changes a version-tracking pointer in the OTA
+// store, not what code this process is actually running -- restarting
+// would accomplish nothing for that case. "agent" is different: a rolled
+// back agent self-update means this process is still running the binary
+// whose health check just failed, and only an exit + restart gets it back
+// onto the reverted one (ResumeSelfUpdate's own doc comment says "the
+// caller is responsible for exiting" after a rollback -- this is that,
+// actually implemented; R05 fix, external security re-review).
+func selfUpdateRollbackRequiresRestart(component string, rec *storage.UpdateHistoryRecord) bool {
+	return component == "agent" && rec != nil && rec.Status == storage.UpdateStatusRolledBack
+}
+
 func buildControllers(baseDir string, registry *adapters.Registry, activeAdapterName string, matrix *version.Matrix, qrxCoreVersion *string, logger *slog.Logger) map[string]components.Controller {
 	agentStore := storeFor(baseDir, "agent")
 	if err := agentStore.BootstrapCurrent(agentVersion); err != nil {

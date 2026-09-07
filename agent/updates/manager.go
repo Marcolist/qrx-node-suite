@@ -253,10 +253,16 @@ type InstallOptions struct {
 
 // InstallResult is what Install returns on success (which, for a
 // self-binary component, means "staged and promoted, awaiting restart" --
-// see PendingRestart).
+// see PendingRestart). JSON tags match dashboard/src/api/types.ts's
+// InstallResult and every sibling response type in this API (e.g.
+// CheckResult) -- this struct had none at all before this fix, so it
+// actually serialized as {"History":...,"PendingRestart":...} rather than
+// the snake_case {"history":...,"pending_restart":...} every doc comment
+// in this codebase describing this response (including this package's
+// own) already assumed.
 type InstallResult struct {
-	History        *storage.UpdateHistoryRecord
-	PendingRestart bool
+	History        *storage.UpdateHistoryRecord `json:"history"`
+	PendingRestart bool                         `json:"pending_restart"`
 }
 
 // Install runs the full safe update workflow from

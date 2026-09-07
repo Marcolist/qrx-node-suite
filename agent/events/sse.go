@@ -24,14 +24,30 @@ func (b *Bus) ServeSSE(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+
+	// Checked (and, on success, registered) before writing any response
+	// headers -- so a caller at the cap gets a normal error response
+	// (Retry-After included) instead of a 200 that immediately hangs with
+	// no events. GET /api/v1/events is intentionally unauthenticated
+	// (docs/security.md's OTA/installer threat models cover the
+	// authenticated surface; this is read-only status data), so nothing
+	// upstream of this already limits how many connections one caller can
+	// open -- MaxSubscribers is what stops an unbounded number of open
+	// connections from holding this process's goroutines and memory open
+	// indefinitely (F10 fix, external security audit).
+	id, ch, ok := b.TrySubscribe()
+	if !ok {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "too many event stream subscribers", http.StatusServiceUnavailable)
+		return
+	}
+	defer b.Unsubscribe(id)
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
-
-	id, ch := b.Subscribe()
-	defer b.Unsubscribe(id)
 
 	for {
 		select {

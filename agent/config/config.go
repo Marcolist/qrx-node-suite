@@ -43,6 +43,23 @@ type Config struct {
 	// (docs/updates.md#qrx-core-updates) and is surfaced in the dashboard.
 	IsValidatorNode bool `json:"is_validator_node"`
 
+	// QRXCoreServiceUseSudo makes agent/platform.Systemd prepend "sudo" to
+	// every qrxd.service systemctl call, for the shipped install (an
+	// unprivileged qrx-agent user with the narrowly-scoped sudoers rule
+	// install.sh installs -- installer/linux/qrx-agent-sudoers -- limited
+	// to exactly "systemctl {start,stop,restart,is-active} qrxd.service",
+	// nothing else). Defaults to false: local/dev runs (docs/development.md,
+	// `go run ./cmd/agentd`) have neither that sudoers rule nor necessarily
+	// a passwordless sudo session, so defaulting this on would make Core
+	// service control hang on a password prompt or fail outright instead
+	// of just calling systemctl directly as whatever user is already
+	// running the process. F12 fix, external security audit: this field
+	// existed as agent/platform.Systemd.UseSudo already, but nothing ever
+	// set it, so Core service control could not work at all against a real
+	// qrxd.service owned by a different user -- the Agent was never meant
+	// to run as root just to manage it.
+	QRXCoreServiceUseSudo bool `json:"qrx_core_service_use_sudo"`
+
 	LogFormat string `json:"log_format"` // "json" or "text"
 	LogLevel  string `json:"log_level"`  // debug/info/warn/error
 }

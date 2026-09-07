@@ -48,3 +48,38 @@ func TestServeSSEOmitsNamedEventField(t *testing.T) {
 		t.Errorf("expected output to start with a \"data: \" line, got:\n%s", body)
 	}
 }
+
+// TestServeSSERefusesOverMaxSubscribers is the F10 fix (external security
+// audit): once MaxSubscribers connections are already open, a new one
+// must get a clean error response, not a 200 that hangs forever with no
+// events -- and must never register as a subscriber (SubscriberCount must
+// not exceed the cap).
+func TestServeSSERefusesOverMaxSubscribers(t *testing.T) {
+	bus := events.NewBus(4)
+	bus.MaxSubscribers = 1
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	req1 := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil).WithContext(ctx1)
+	rec1 := httptest.NewRecorder()
+	done1 := make(chan struct{})
+	go func() {
+		bus.ServeSSE(rec1, req1)
+		close(done1)
+	}()
+	time.Sleep(20 * time.Millisecond) // let the first connection register
+
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil)
+	rec2 := httptest.NewRecorder()
+	bus.ServeSSE(rec2, req2) // no context to cancel -- must return on its own
+
+	if rec2.Code != http.StatusServiceUnavailable {
+		t.Fatalf("2nd connection status = %d, want %d", rec2.Code, http.StatusServiceUnavailable)
+	}
+	if bus.SubscriberCount() != 1 {
+		t.Fatalf("SubscriberCount() = %d, want 1 -- the refused connection must not register", bus.SubscriberCount())
+	}
+
+	cancel1()
+	<-done1
+}

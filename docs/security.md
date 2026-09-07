@@ -32,7 +32,10 @@ addressed in `agent/updates/manifest` and `agent/updates`.
 | **A "successful" OTA update with no real effect** (a compromised or buggy update source could -- or, before this fix, simply a normal dashboard update always did -- report success while the old, potentially-vulnerable code keeps serving every request) | `cmd/agentd`'s dashboard HTTP handler now resolves the OTA store's `Store.CurrentDir()` on every request (falling back to the install-time-seeded directory only when nothing has ever been promoted), so a promoted dashboard update takes effect on the very next request -- matching `components.Dashboard`'s `RequiresRestart()==false` design and `Manifest.Validate`'s guarantee that whatever got promoted was itself signature-verified. As of the fix for an external audit's F07 finding. |
 | **Configured adapter connection settings silently discarded** (`cfg.Adapter.CLIPath`/`Network`/`WalletName`/`DataDir` -- exactly what connects the Agent to a real QRX Core node -- never reaching the adapter that actually activates, whenever `cfg.Adapter.Name` is empty, i.e. the default automatic-selection config `install.sh` generates) | `cmd/agentd/main.go` now pre-configures every adapter returned by `adapters.Installed()`, not just one looked up by `cfg.Adapter.Name` (which is `""` in automatic mode, so the old single-name `Configure("", ...)` call looked up an adapter literally named `""`, found none, and silently did nothing) -- whichever adapter `registry.SelectAutomatic` later picks and activates has therefore already received the operator's settings via `SetConfig`. Confirmed by direct reproduction against the real `qrx007` adapter type before fixing. As of the fix for an external audit's F11 finding. |
 | **Crash loop the in-process guard can't see** (a self-update binary so broken the kernel can't even `exec()` it -- wrong architecture, a truncated/corrupted extraction, a stripped executable bit -- never gives `BootGuard` a chance to run at all, since that requires the Go runtime to already be executing) | The shipped systemd unit sets `StartLimitIntervalSec=300`/`StartLimitBurst=8` as an OS-level circuit breaker independent of `BootGuard`'s own SQLite-backed counter: once systemd itself has retried that often within the window, it stops and marks the unit `failed` rather than looping forever. Set higher than `BootGuard.MaxAttempts` so BootGuard gets the first chance to self-heal via rollback. As of the fix for an external audit's F07 finding; see `docs/updates.md`'s "Crash-loop guard" section. |
-| **Downgrade and replay protection both silently disabled on a freshly bootstrapped install** (a system that has never completed one real OTA update has an empty `store.Store.Current()`, and `manifest.CheckNotDowngrade`/`CheckNotReplayed` both explicitly treat an empty current-version/last-seen as "nothing recorded yet" and let anything through -- so an attacker, or a compromised/buggy update source, offering an older, already-patched-away-from version, or replaying a stale-but-validly-signed manifest, would have it accepted on that very first check, with neither protection able to object) | `cmd/agentd`'s `buildControllers` now calls the new `store.Store.BootstrapCurrent` for "agent" and any active adapter at every startup -- a no-op once a real OTA update has ever promoted something, but on a fresh install it registers the actually-running binary's version as the baseline before any update check can happen, restoring both protections from the very first check instead of leaving a permanent gap until the first successful update. Confirmed by direct reproduction (a test proving the downgrade is silently accepted without this fix, and rejected with it) before fixing. As of the fix for R05, an external security re-review of the F07 fix -- this fix covers the bootstrap-registration piece of R05 specifically; see the "Known limitation" note below it covers a separate, larger piece of the same finding that is not yet fixed. |
+| **Downgrade and replay protection both silently disabled on a freshly bootstrapped install** (a system that has never completed one real OTA update has an empty `store.Store.Current()`, and `manifest.CheckNotDowngrade`/`CheckNotReplayed` both explicitly treat an empty current-version/last-seen as "nothing recorded yet" and let anything through -- so an attacker, or a compromised/buggy update source, offering an older, already-patched-away-from version, or replaying a stale-but-validly-signed manifest, would have it accepted on that very first check, with neither protection able to object) | `cmd/agentd`'s `buildControllers` now calls the new `store.Store.BootstrapCurrent` for "agent" and any active adapter at every startup -- a no-op once a real OTA update has ever promoted something, but on a fresh install it registers the actually-running binary's version as the baseline before any update check can happen, restoring both protections from the very first check instead of leaving a permanent gap until the first successful update. Confirmed by direct reproduction (a test proving the downgrade is silently accepted without this fix, and rejected with it) before fixing. As of the fix for R05, an external security re-review of the F07 fix -- this fix covers the bootstrap-registration piece of R05 specifically; see below for the larger piece of the same finding (a promoted self-update binary having no path to actually run), which is now also fixed. |
+| **A "successful" self-binary OTA update with no path to ever actually run** (`Store.Promote` only ever flipped a symlink *inside* the OTA store; nothing made `${QRX_PREFIX}/bin/agentd` -- the fixed path systemd's `ExecStart` always execs -- ever resolve to what got promoted, and nothing ever read `InstallResult.PendingRestart` to exit the process so a restart could happen at all. A self-update could verify, download, stage, and flip its internal pointer correctly and have zero observable effect on what code the Agent actually executes, ever) | See `docs/updates.md#self-binary-components-agent-adapters`: `install.sh`'s `bootstrap_agent_ota_store()` now makes `${QRX_PREFIX}/bin/agentd` a symlink into the OTA store's `current` release instead of a plain file copy, so `Store.Promote()`'s existing atomic rename transitively repoints what `ExecStart` execs; `Deps.RequestSelfRestart` (called by the `updates/install`/`updates/rollback` handlers on `PendingRestart: true`) triggers the same graceful-shutdown path `SIGTERM` already used, so systemd's `Restart=always` actually gets a chance to restart onto it; and a rolled-back self-update (`selfUpdateRollbackRequiresRestart`, scoped to `agent` only) makes `cmd/agentd` exit again so the *next* restart lands on the reverted binary. As of the fix for R05 (external security re-review of the F07 fix); `installer-ci.yml`'s Docker smoke test drives a real install-then-rollback `A -> B -> A` cycle through the live HTTP API against real systemd to verify this, since this repository's own development sandbox has no working Docker/systemd to verify it directly. |
+| **`bootstrap_agent_ota_store` registered "local" as the OTA store's current version for offline/local-tarball installs** (`install.sh`'s `QRX_LOCAL_TARBALL` path -- offline/air-gapped installs, and this project's own Docker smoke test -- sets `RELEASE_VERSION="local"`, a placeholder never meant to be a real version string. The R05 install.sh fix fed it straight into `bootstrap_agent_ota_store` as the OTA store's release identifier, so `store.Store.Current()` ended up `"local"`, which doesn't parse as a semantic version -- `manifest.CheckNotDowngrade`'s `version.Compare` falls back to a raw string comparison for anything that doesn't parse as one, and `"0.0.1"` loses to `"local"` lexicographically. Every future update on any system ever installed from a local tarball would have been rejected as a downgrade, regardless of whether it actually was one) | `install_release()` now reads the tarball's own `VERSION` file (present in every release this project builds, GitHub-sourced or local) for the OTA store's release identifier instead of `$RELEASE_VERSION`, falling back to it only if that file is somehow missing. Found by `installer-ci.yml`'s Docker smoke test's self-update round trip (the same test that verifies the two rows below) failing its very first assertion (the launcher symlink resolving to `releases/local/agentd` instead of the real version) immediately after the R05 install.sh fix landed. |
+| **Every update install, ever, failed at the download step under the shipped sandbox** (`Manager.Install` and `QRXCoreUpdateManager.Update` both download an update artifact to `os.CreateTemp("", ...)`, which defaults to `/tmp` -- but the shipped systemd unit's `ProtectSystem=strict` makes the real `/tmp` read-only for the unit, and `ReadWritePaths` never included it. This affected every update path, not just the R05 self-binary case above, and had never been caught because nothing had ever exercised a real `Install`/`Update` call against the real shipped sandbox before -- every prior round of review, including this one's own initial R05 fix, tested the pieces around it (the symlink chain, the restart wiring) without ever actually running a download through the real unit) | `PrivateTmp=true` added to the systemd unit (`install.sh`'s generated one and the static `installer/linux/qrx-agent.service` reference): a systemd-managed private, genuinely writable `/tmp` for this unit, set up before it starts -- no capability needed by the unprivileged `qrx-agent` process itself, and a further hardening besides the fix (this unit's temp files are no longer visible to other processes' `/tmp` either). Found and confirmed by the same self-update round trip once the version-comparison bug above (which had been masking it, by rejecting the update before it ever reached the download step) was fixed. |
 
 ## Installer threat model
 
@@ -43,64 +46,10 @@ threat model above.
 
 | Threat | Mitigation |
 |---|---|
-| **Installer log symlink attack** (a compromised, unprivileged `qrx-agent` process plants a symlink at `install.log`'s path so a later root-run `install.sh` truncates an arbitrary root-owned file instead) | `QRX_LOG_DIR` is root-owned (`root:qrx-agent`, mode `0750`), not agent-writable, so `qrx-agent` can no longer place anything there at all; `setup_logging()` additionally creates `install.log` via `init_log_file()`, an atomic write-elsewhere-then-`rename(2)`-over-the-destination that never opens or truncates through the existing path at all -- safe against both a symlink already present and one raced into place mid-install by a still-running compromised process, covering a system upgraded from an older, vulnerable installer that still has an agent-owned log directory left over from its first install. As of the fix for an external audit's F04 finding, hardened against a remaining TOCTOU race by R02 (external re-review: the first fix's "check for a symlink, then truncate" had a window between the two that a concurrent attacker could win, reproduced in `installer/test/test-detection.sh`'s regression test before being closed). See `docs/installer.md#installer-log-directory`. |
+| **Installer log symlink attack** (a compromised, unprivileged `qrx-agent` process plants a symlink at `install.log`'s path so a later root-run `install.sh` write follows it instead of the real log file) | `QRX_LOG_DIR` is root-owned (`root:qrx-agent`, mode `0750`), not agent-writable, so `qrx-agent` can no longer place anything there at all; `setup_logging()` creates `install.log` via `init_log_file()`, which opens a file descriptor (`LOG_FD`) on a private `mktemp`-generated temp file *before* that file is ever visible at the public path, then atomically `rename(2)`s it into place -- safe against both a symlink already present and one raced into place mid-install. Critically, every `log()` call for the rest of the install writes through that same held descriptor, never by reopening `install.log`'s path -- a file descriptor is bound to the underlying inode, not the path, so a symlink planted at *any later point* (not just before the first write) can no longer redirect anything. Covers a system upgraded from an older, vulnerable installer that still has an agent-owned log directory left over from its first install. As of the fix for an external audit's F04 finding, hardened by two rounds of external re-review: R02 first closed the race between checking for a symlink and truncating through it (an atomic rename replaced that check-then-act pattern), then a second re-review found the atomic rename alone only protected the *first* write -- every later `log()` call still reopened the path each time, reproducibly exploitable, closed by moving to a held file descriptor. See `docs/installer.md#installer-log-directory`. |
 | **Uninstaller delete-target hijack** (a compromised, unprivileged `qrx-agent` process points `uninstall.sh --remove-qrx-core`'s marker file at an arbitrary directory, which is then `rm -rf`'d as root) | The marker (`qrx-core-installed-by-this-installer`) lives under `QRX_CONFIG_DIR` (`root:qrx-agent`, mode `0750`), never the agent-writable `QRX_DATA_DIR`, so `qrx-agent` cannot plant or rewrite it at all. As a second, independent line of defense, `uninstall.sh` resolves the marker's content (following any symlinks) and refuses to remove anything that doesn't fall under the documented QRX Core install root (`/opt/qrx`) -- never "/", "/etc", or a symlink escape. As of the fix for an external audit's F05 finding; see `docs/installer.md#qrx-core-removal-safety`. |
 | **`--remove-qrx-core` silently doing nothing when combined with `--purge-data`** (moving the F05 marker under `QRX_CONFIG_DIR` meant `--purge-data`'s `rm -rf` of that whole directory could delete the marker before `--remove-qrx-core` ever read it -- an operator explicitly asking for both, e.g. when decommissioning a machine, would end up with QRX Core silently left behind) | `main()` now runs `remove_qrx_core` before `purge_data`, so the marker is always read while it still exists. As of the fix for R04, an external re-review of the F05 fix; see `docs/installer.md#qrx-core-removal-safety`. |
-
-## Known limitation: a promoted self-update binary has no path to actually run
-
-**This is the largest piece of the R05 finding and is NOT fixed.** Investigating
-R05 (an external security re-review of the F07 fix) surfaced something more
-severe than the finding's own description: as wired today, a self-binary OTA
-update (`agent`, or any `adapter_*`) has **no mechanism at all** for a promoted
-binary to ever actually run.
-
-- `components.Agent.Extract` writes the new binary into the OTA store's own
-  layout (`<QRX_DATA_DIR>/components/agent/releases/<version>/agentd`).
-  `store.Store.Promote` only flips symlinks *within that same layout*
-  (`current -> releases/<version>`) -- it never touches
-  `${QRX_PREFIX}/bin/agentd`, the completely separate, fixed path
-  `install.sh` writes once at install time and the shipped systemd unit's
-  `ExecStart` always execs.
-- `Manager.Install`'s self-binary path returns `InstallResult.PendingRestart:
-  true`, documented as "the caller must arrange a process restart" -- but
-  nothing in `agent/api` or `cmd/agentd` ever reads `PendingRestart` or exits
-  the process because of it. `docs/updates.md`'s "Crash-loop guard" section
-  already described `cmd/agentd` as "responsible for exiting so the process
-  supervisor restarts it"; that description was aspirational, not something
-  the code actually did.
-- Even if the process did exit, systemd would simply re-exec the exact same,
-  unchanged `${QRX_PREFIX}/bin/agentd` file -- the newly promoted binary
-  sitting in the OTA store is never the one that runs.
-
-In short: a self-binary "successful" OTA update today verifies, downloads,
-stages, and flips an internal pointer correctly, but has zero observable
-effect on what code the Agent actually executes, ever -- there is currently no
-tested path from "Promote succeeded" to "the new binary is running."
-
-**Why this isn't fixed here:** the correct fix is architectural, not a
-one-line patch -- most plausibly, making `${QRX_PREFIX}/bin/agentd` itself a
-symlink into the OTA store's `current` release (set up once by `install.sh` at
-install time, pointing into the already-agent-writable `QRX_DATA_DIR`, so
-`Promote` transitively repoints it with no `ProtectSystem=strict`/
-`ReadWritePaths` sandboxing changes needed), combined with `cmd/agentd`
-actually exiting on `PendingRestart: true` so systemd's restart re-execs
-through that symlink onto the new binary. That combination needs to be proven
-with a real `A -> B -> A` cycle -- install version A, self-update to B,
-confirm the restarted process is actually running B, force B to fail its
-health check or be non-executable, confirm systemd/BootGuard together land
-back on A -- against a real systemd instance across an actual process restart.
-This sandbox has no working Docker daemon and is not itself booted under
-systemd (confirmed: `dockerd`/`docker` are installed but there is no
-`/var/run/docker.sock` and no daemon to start one with, and `systemctl`
-reports "System has not been booted with systemd as init system"), so that
-verification cannot be done here. Shipping a change to how the Agent's own
-running binary gets selected, unverified against real process-restart
-behavior, risks leaving every future install unable to start at all with no
-way to have caught it first -- worse than the current, honestly-documented
-gap. This needs a session with real systemd/Docker test capability (this
-project's own `installer-ci.yml` Docker smoke tests are the right place to
-extend once a fix is implemented) rather than a blind attempt here.
+| **Documentation overstating what re-running `install.sh` does** (`docs/installer.md#upgrades` claimed a re-run "does not re-install or touch your existing configuration/database", implying a pure detect-and-stop, when the actual code only warns before continuing through `install_release`/`install_systemd_service` regardless -- reinstalling the binary and dashboard and restarting `qrx-agent.service` every time, outside the OTA system's staged/health-checked/rollback-safe path, even though configuration and the database genuinely are left alone) | Not a code bug in the sense of doing something unsafe -- every non-idempotent side effect (reinstalling the binary/dashboard, restarting the service) is itself safe, just not what the docs promised. Fixed by correcting the documentation and the script's own runtime warning message to describe what re-running actually does, rather than restricting the installer to match an overstated claim: the Agent's own OTA system already exists and is the better tool for a routine upgrade, and this script deliberately stays willing to run so it remains usable to recover a broken/incomplete first install. As of the fix for an external audit's F14 finding; see `docs/installer.md#upgrades`. |
 
 ## Hard guarantees (detail)
 
@@ -121,12 +70,33 @@ Expanding on [`SECURITY.md`](../SECURITY.md)'s summary:
    `agent/api`'s auth middleware (docs/development.md) and
    `agent/storage.AuditLogStore`; every `ADMIN_*` action constant is defined
    in `agent/storage/audit_log.go`.
+7. **An explicitly-requested config that fails to load is a startup
+   failure, never a silent fallback to Mock-mode defaults.**
+   `cmd/agentd/main.go`'s `requireConfigPathExists` rejects a `-config`/
+   `QRX_AGENT_CONFIG` path that doesn't exist or isn't readable before
+   `config.LoadInto` (whose own contract, correctly, is "no path requested
+   at all -> Default()'s values stand" for zero-config Mock-mode
+   development) ever runs -- a real, intended config being unreachable is
+   not the same situation as none being requested, and conflating them
+   meant a broken install (a typo'd path, a permissions problem) could
+   silently boot serving assumed/fake node data with no error anywhere.
+   As of the fix for an external audit's F13 finding.
 
 ## External audit: confirmed findings not yet fixed
 
 An external security audit of this codebase (16 findings, F01-F16) has been
-worked through in priority order: F01-F05, F07, F08, and F11 are fixed above,
-each with a regression test that fails against the pre-fix code. The
+worked through in priority order: F01-F05, F07, F08, F11, and F14 are
+fixed above, each with a regression test that fails against the pre-fix
+code (F14, a documentation-vs-code mismatch, is verified by the docs now
+matching the actual behavior rather than a test); F13 is partially fixed
+(see [Hard guarantees](#hard-guarantees-detail) item 7 for what's fixed,
+and below for what's still deferred); F09, F10, and F12 are each
+partially fixed, below, with the same fixed/deferred split noted inline;
+F15 has a reachability assessment against each named advisory but still
+no committed lockfile (this sandbox's own network policy blocks npm
+registry access -- see its note below for why a lockfile wasn't
+hand-written as a substitute).
+The
 remaining findings were independently verified against the current source
 (never taken on faith from the report) and are confirmed real, but are
 deferred rather than fixed in the same pass -- each for a reason noted below,
@@ -136,67 +106,167 @@ document should not make unilaterally, or because the finding's blast radius
 is broad enough to deserve its own dedicated review rather than a patch
 appended to an already-large change.
 
-- **F09 -- LAN exposure.** Confirmed: `agent/api` only wraps mutating
-  endpoints in `RequireAdmin` (`server.go`); read endpoints
-  (`/api/v1/status`, `/api/v1/system`, `/api/v1/updates`, ...) are
-  unauthenticated by design, there is no `Host`/`Origin` allowlist anywhere
-  in the HTTP stack, and the admin bearer token travels in cleartext (no TLS
-  termination exists in this codebase at all). `QRX_DASHBOARD_BIND=lan` is
-  opt-in and off by default (`docs/installer.md#dashboard-access`), which
-  bounds but doesn't eliminate the exposure once an operator does turn it
-  on. Deferred: closing this properly means deciding on a security posture
-  (TLS, a Host/Origin allowlist for LAN bind, or authenticating read
-  endpoints too) rather than a narrow bug fix.
-- **F10 -- resource limits.** Confirmed: no request body size limits, no
-  per-request timeouts beyond `http.Server`'s zero-value (no) defaults, no
-  cap on concurrent SSE connections, and `Policy.Locked` (`agent/updates`)
-  is a persisted boolean, not a mutex -- it prevents a *second admin
-  request* from starting a concurrent install, but doesn't serialize
-  concurrent goroutines within this process. Deferred as a general
-  hardening pass rather than one fix.
-- **F12 -- Core service control lacks least privilege.** Confirmed:
-  `agent/platform.New()` returns a `Systemd` service manager with
-  `UseSudo: false` by default, so `qrxd.service` start/stop/restart calls
-  have no privilege-escalation path at all as currently wired:
-  `installer/linux/qrx-agent-sudoers` exists in the repo but neither
-  `install.sh` nor `cmd/agentd/main.go` reference it or `UseSudo`
-  anywhere -- it is a dead, never-installed policy file, so Core service
-  control genuinely cannot work against a real `qrxd.service` owned by a
-  different user today; `QRXCoreUpdateManager`'s `StartCore` callback in `cmd/agentd/main.go`
-  ignores the `dir` argument it's given; no `Probe` is configured, so
-  Core health checks report "no health probe configured" rather than a
-  real liveness signal; `QRXCoreUpdateManager.Update` does not cross-check
-  the caller-supplied profile's target version the way `SwitchVersion`
-  does. Deferred: this is the real "Core/adapter binding" work the audit's
-  closing instructions name as the next priority tier, and is substantial
-  enough (a least-privilege helper design, a real health probe, wiring
-  `dir` through) to warrant its own pass.
-- **F13 -- Mock-mode fallback is silent.** Confirmed: an explicitly-named
-  but nonexistent `-config` path falls back to Mock-mode defaults with no
-  error; `GET /api/v1/version` reports an assumed `qrx_core_version` even
-  with no real node connected; `/health` is pure liveness, not readiness.
-  Deferred: fixing the silent-fallback case cleanly means deciding whether
-  a bad `-config` path should be a hard startup failure (a behavior
-  change worth flagging to operators, not a drive-by patch).
-- **F14 -- re-running `install.sh` doesn't match its own documentation.**
-  Confirmed: `docs/installer.md#upgrades` says re-running `install.sh`
-  "does not re-install or touch your existing configuration/database", but
-  the actual code only *warns* when it detects an existing install
-  (`main()`'s `if [[ -f /etc/systemd/system/qrx-agent.service ]]` check)
-  and then proceeds through `install_release`/`install_systemd_service`
-  regardless, overwriting the binary, dashboard, and systemd unit outside
-  the OTA system's staged/health-checked/rollback-safe path. Deferred:
-  the fix is either making the installer actually stop (matching the
-  docs) or correcting the docs to match the code -- a product decision,
-  not fixed here to avoid changing installer behavior without that
-  decision.
-- **F15 -- npm advisories.** `dashboard/package.json` exists but no
-  lockfile is currently committed, so a reachability assessment (does this
-  project's actual production usage hit the vulnerable code path in each
-  of the 4 advisories the audit named -- a Vite Windows path check, a Vite
-  sourcemap traversal, an esbuild dev-server issue, and a React Router
-  redirect/SSR-hydration issue) needs a committed lockfile to audit
-  against reproducibly. Deferred pending that.
+- **F09 -- LAN exposure (partially fixed).** Confirmed three distinct
+  issues under this finding. **Fixed:** there was no `Host` allowlist
+  anywhere in the HTTP stack, meaning a DNS-rebinding attacker (a public
+  domain whose DNS record is switched to `127.0.0.1` or this machine's LAN
+  address after a browser's initial same-origin check already passed)
+  could reach every unauthenticated read endpoint, and even the
+  `RequireAdmin`-gated ones with a stolen/guessed token, from a page
+  hosted anywhere on the internet, regardless of `QRX_DASHBOARD_BIND`.
+  `RequireAllowedHost` (`agent/api/hostcheck.go`) now wraps the entire mux
+  and rejects any request whose `Host` header doesn't name a loopback or
+  private-network address (RFC 1918 / link-local / `localhost`) --
+  config-free by design, since a fixed allowlist of one detected-at-install
+  IP would go stale the moment DHCP reassigns it. Origin/CORS wasn't
+  separately needed: this server sends no CORS headers at all, so a
+  browser already blocks a cross-origin page from reading any response,
+  and the admin endpoints' required `Authorization` header forces a CORS
+  preflight this server never answers, blocking the write itself too --
+  `Host` was the one gap DNS rebinding could still exploit. **Still
+  deferred:** read endpoints (`/api/v1/status`, `/api/v1/system`,
+  `/api/v1/updates`, ...) remain unauthenticated by design, and the admin
+  bearer token still travels in cleartext (no TLS termination exists in
+  this codebase at all) -- `QRX_DASHBOARD_BIND=lan` is opt-in and off by
+  default (`docs/installer.md#dashboard-access`), which bounds but doesn't
+  eliminate the exposure to anyone already on the same LAN once an
+  operator does turn it on. Closing those two needs deciding on a broader
+  security posture (TLS, or authenticating read endpoints too) rather than
+  a narrow bug fix.
+- **F10 -- resource limits (partially fixed).** Confirmed four distinct
+  issues under this finding. **Fixed:** no request body size limits
+  (`decodeJSON` now wraps every body in `http.MaxBytesReader`, 64 KiB --
+  the only place any handler in this package reads a request body at all);
+  no read-side per-request timeouts (`http.Server`'s
+  `ReadHeaderTimeout`/`ReadTimeout`/`IdleTimeout` now set, bounding
+  slowloris-style attacks and idle keep-alive connections; `WriteTimeout`
+  deliberately left unset -- it covers the entire response including an
+  intentionally long-lived stream, and would forcibly cut off
+  `GET /api/v1/events` after that duration); no cap on concurrent SSE
+  connections (`events.Bus.MaxSubscribers`, checked and registered
+  atomically under the same lock in the new `TrySubscribe`, refuses past
+  256 concurrent subscribers with a `503`/`Retry-After` rather than
+  accepting an unbounded number of open connections). **Still deferred:**
+  `Policy.Locked` (`agent/updates`) is a persisted boolean, not a mutex --
+  it prevents a *second admin request* from starting a concurrent install,
+  but doesn't serialize concurrent goroutines within this process; closing
+  that needs a real in-process lock around `Manager.Install`/`Rollback`,
+  which is a large enough change to the update-execution path to warrant
+  its own review rather than a patch bundled with the resource-exhaustion
+  fixes above.
+- **F12 -- Core service control lacks least privilege (partially fixed).**
+  Confirmed four distinct issues under this finding. **Fixed:**
+  `agent/platform.New()` returned a `Systemd` service manager with
+  `UseSudo: false` by default and nothing ever set it, so `qrxd.service`
+  start/stop/restart calls had no privilege-escalation path at all as
+  wired -- `installer/linux/qrx-agent-sudoers` existed in the repo but
+  neither `install.sh` nor `cmd/agentd/main.go` referenced it or
+  `UseSudo` anywhere, a dead, never-installed policy file, so Core
+  service control genuinely could not work against a real `qrxd.service`
+  owned by a different user. `install.sh`'s new `install_qrx_core_sudoers`
+  now generates the real rule (the actual configured
+  `QRX_SERVICE_USER`, `visudo -c`-validated before it's installed where
+  sudo will read it -- a malformed sudoers file breaks sudo system-wide,
+  not just this rule) and `Config.QRXCoreServiceUseSudo` (defaulting to
+  `false`, so `docs/development.md`'s local `go run ./cmd/agentd` --
+  without the sudoers rule or necessarily a passwordless sudo session --
+  keeps calling `systemctl` directly rather than hanging on a password
+  prompt) wires `agent/platform.Systemd.UseSudo` through an anonymous
+  interface assertion (`cmd/agentd/main.go` has no build tag of its own,
+  so it can't reference the Linux-only concrete `*Systemd` type directly
+  without breaking non-Linux builds). `QRXCoreUpdateManager.Update` now
+  cross-checks `opts.Profile.QRXCoreVersion` against the manifest's
+  offered version the same way `SwitchVersion` already did -- without it,
+  `CheckSwitchSafety` could validate a profile for an unrelated version
+  while actually switching to whatever the manifest offered. **Still
+  deferred:** `StartCore`'s `dir` argument is still ignored, and no
+  `Probe` is configured. Both need a confirmed QRX Core deployment/CLI
+  contract this project doesn't have: `docs/qrx-0.0.7-interface.md` (its
+  own "What is NOT confirmed" section) documents the `qrx-cli` command
+  surface itself as unverified, and this project's own QRX Core boundary
+  rule (`docs/architecture.md`, this document's own Scope section) is
+  that QRX Core's deployment layout is entirely outside this project's
+  authority -- unlike `agentd`'s own OTA symlink-launcher fix (R05,
+  above), which this project fully controls and could verify end-to-end,
+  building a symlink-launcher-style `StartCore` or a real height/peer-
+  sampling `Probe` against an unconfirmed interface would be exactly the
+  kind of invented behavior this codebase's own principles rule out.
+  Closing this needs either a confirmed QRX Core interface spec or an
+  explicit product decision on how far this project verifies a system it
+  doesn't own.
+- **F13 -- Mock-mode fallback is silent (partially fixed).** Confirmed
+  three distinct issues under this finding. **Fixed:** an explicitly-named
+  but nonexistent `-config` path used to fall back to Mock-mode defaults
+  with no error at all -- see [Hard guarantees](#hard-guarantees-detail)
+  item 7. **Still deferred:** `GET /api/v1/version` reports an assumed
+  `qrx_core_version` (`AdapterConfig.AssumedQRXCoreVersion`) even with no
+  real node connected -- already logged as a warning at the point it's
+  used (`agent/config/config.go`'s own doc comment), so this is
+  a narrower, already-flagged case than the silent-startup gap, and
+  changing what `/api/v1/version` reports is a dashboard-facing behavior
+  change of its own; `/health` is pure liveness (does this process
+  respond at all), not readiness (is it actually connected to a working
+  QRX Core node) -- deferred because that's a genuine design decision
+  (a second `/ready` endpoint? redefine `/health`'s semantics, breaking
+  anything that already polls it as pure liveness?) this document
+  shouldn't make unilaterally.
+- **F15 -- npm advisories (reachability assessed; lockfile still
+  blocked).** `dashboard/package.json` still has no committed lockfile --
+  not by choice: this session's sandbox blocks direct access to
+  `registry.npmjs.org` at the network-policy layer (`npm install` and a
+  direct `curl` both get an explicit `403`/`host_not_allowed` from the
+  egress proxy, not a transient failure), so `npm install`/`npm ci` cannot
+  run here at all, and a lockfile was deliberately NOT hand-written (a
+  fabricated lockfile with invented integrity hashes and resolved
+  versions would be actively wrong, not just incomplete -- it could
+  silently misdescribe what `npm ci` actually installs). What follows is
+  a manual reachability assessment against each of the 4 advisories the
+  audit named, matched to public GHSA records by description (no live
+  `npm audit` was run):
+  - **Vite Windows path check** (`server.fs.deny` bypassed via a
+    backslash on Windows, `GHSA-93m4-6634-74q7`): affects Vite
+    `>=5.2.6,<=5.4.20` (fixed in `5.4.21`); `package.json`'s prior
+    `"vite": "^5.4.0"` could have resolved anywhere in that vulnerable
+    range absent a lockfile, so it's now pinned to `^5.4.21` (a one-line
+    fix that doesn't need a lockfile to take effect once one exists). Even
+    unpatched, the advisory's own precondition -- the dev server
+    explicitly exposed to the network via `--host`/`server.host` -- is
+    never met here: `dashboard/vite.config.ts` sets no `server.host`
+    (Vite's own default keeps it loopback-only), and the dev server is
+    never part of any shipped install in any case (`install.sh` ships
+    `vite build`'s static output, served by `cmd/agentd`'s own Go HTTP
+    handler, not a running Vite process).
+  - **Vite sourcemap traversal** (`GHSA-4w7w-66w2-5vf9`, path traversal in
+    optimized-deps `.map` handling): confirmed to affect Vite 6.x/7.x/8.x
+    only, not the 5.x line this project is pinned to at all -- not
+    applicable regardless of exact resolved version.
+  - **esbuild dev-server issue** (`GHSA-67mh-4wv8-2f99`: esbuild's dev
+    server sets `Access-Control-Allow-Origin: *`, letting any website read
+    responses from a developer's local dev server; esbuild `<=0.24.2`,
+    fixed in `0.25.0`; esbuild is a transitive dependency of Vite 5.4.x's
+    dev server, not declared directly): same reasoning as the Vite finding
+    above -- dev-server-only, never network-exposed by this project's own
+    config, never part of a shipped install.
+  - **React Router redirect/SSR-hydration issue** (closest public match:
+    `GHSA-337j-9hxr-rhxg` / CVE-2026-53666, arbitrary constructor
+    injection via `deserializeErrors()` during SSR hydration): affects
+    `react-router` (the v7 unified package) `<=7.18.0`; this project
+    depends on the older, separate `react-router-dom` `^6.26.0` package,
+    a different major line. Moot either way: `dashboard/src/App.tsx` uses
+    `HashRouter` -- pure client-side rendering, no server-side rendering
+    or hydration anywhere in this codebase -- and the advisory's own text
+    says it "does not impact applications using Declarative Mode," which
+    is exactly what this is.
+
+  In short: none of the 4 named advisories reach this project's actual
+  production deployment (a Go binary serving pre-built static files, no
+  Node.js process involved at all once built), and the one that could
+  plausibly affect a developer's local machine (the Vite/esbuild dev-
+  server pair) already fails its own network-exposure precondition here.
+  Generating and committing a real lockfile, and running a real `npm
+  audit` against it, is still worth doing in an environment that can
+  reach the npm registry -- this assessment is a reasoned stand-in, not a
+  replacement for that.
 
 Every fix above was verified against the actual current source before
 being made (never assumed from the audit report's prose), and every

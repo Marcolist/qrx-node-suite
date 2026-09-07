@@ -110,6 +110,9 @@ func (d *Deps) handleUpdatesInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+	if result != nil && result.PendingRestart && d.RequestSelfRestart != nil {
+		d.RequestSelfRestart()
+	}
 }
 
 type rollbackRequest struct {
@@ -142,6 +145,9 @@ func (d *Deps) handleUpdatesRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+	if result != nil && result.PendingRestart && d.RequestSelfRestart != nil {
+		d.RequestSelfRestart()
+	}
 }
 
 type activateVersionRequest struct {

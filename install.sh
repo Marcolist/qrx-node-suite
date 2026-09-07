@@ -42,16 +42,45 @@ QRX_LOCAL_TARBALL="${QRX_LOCAL_TARBALL:-}"
 # The project's release-signing public key (agent/cmd/gen-signing-key).
 # This is the trust anchor for verify_release()'s signature check -- it
 # must never be fetched from the same release location it verifies (that
-# would let a compromised release location trust itself). It is the same
-# key family used by the Agent's own OTA manifest verification
-# (docs/updates.md#update-manifest, docs/security.md).
+# would let a compromised release location trust itself).
+#
+# Deliberately a DIFFERENT keypair from QRX_TRUSTED_MANIFEST_PUBLIC_KEY_B64
+# below, per docs/deployment.md#signing-keys: this one signs the release
+# TARBALL's SHA256SUMS (agent/cmd/sign-checksums, this installer's own
+# verify_signature), the other signs OTA update MANIFESTS
+# (agent/cmd/sign-manifest, agent/updates/manifest, verified by the
+# installed Agent itself, not this script). Keeping them separate means a
+# compromise of one signing flow (e.g. the machine/secret that signs
+# releases) doesn't also let an attacker push a malicious self-update to
+# every already-installed Agent, or vice versa.
 QRX_TRUSTED_PUBLIC_KEY_B64="tIxWU9IsRUw1/TwS+mvkhBUjPWVezLQZ9S3uVm6BSJs="
+
+# The OTA update manifest signing public key (agent/cmd/gen-signing-key,
+# agent/updates/manifest) -- written into every install's generated
+# agent.json as updates.public_key_base64, the trust anchor the Agent
+# itself uses for every future update.Manager.Install/Check call (never
+# used by this script). Before this was wired in here, write_config()
+# left updates.public_key_base64 as "", which means
+# manifest.VerifyManifestSignature/VerifyArtifact fail closed on every
+# manifest and artifact (manifest.ErrNoPublicKey) -- self-update could
+# never succeed on ANY real install, regardless of anything else being
+# fixed (a gap the external security re-review flagged directly). See
+# .github/workflows/release.yml's "Sign OTA update manifests" step (the
+# MANIFEST_SIGNING_PRIVATE_KEY repo secret) for where the corresponding
+# private key signs manifests -- that secret is not the same as
+# RELEASE_SIGNING_PRIVATE_KEY, see the comment above.
+QRX_TRUSTED_MANIFEST_PUBLIC_KEY_B64="mXM+5S/vc9F+poSegmqBqOLsOXMb9NpU7kAtLDTdoHk="
 
 INSTALLER_VERSION="1"
 TOTAL_STEPS=8
 STEP_NUM=0
 WORKDIR=""
 LOG_FILE="/tmp/qrx-node-suite-install.log"
+# LOG_FD, once setup_logging() succeeds, holds a file descriptor already
+# open on LOG_FILE's underlying inode -- see init_log_file's doc comment
+# for why every log() call writes through this fd rather than reopening
+# LOG_FILE by path (R02 fix, external security re-review).
+LOG_FD=""
 INSTALL_START_EPOCH=$(date +%s)
 
 # ============================================================
@@ -65,7 +94,27 @@ fi
 SYM_OK=$'\xe2\x9c\x93'   # UTF-8 checkmark
 SYM_FAIL=$'\xe2\x9c\x97' # UTF-8 cross
 
-log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >>"$LOG_FILE" 2>/dev/null || true; }
+# log() writes through the already-open LOG_FD when setup_logging()
+# established one, never by reopening $LOG_FILE's path -- reopening by
+# path on every call is exactly the R02 gap (external security
+# re-review): init_log_file's original fix only protected the very first
+# write, but every later log() call still resolved $LOG_FILE by path
+# again, so a symlink planted at that path at any point during the rest
+# of the run (QRX_LOG_DIR can stay agent-writable until install_release()
+# re-secures it, later in main()) would have every subsequent append
+# follow it. A file descriptor is bound to the underlying inode, not the
+# path, so once LOG_FD is open, nothing that later happens to the path
+# can redirect these writes anywhere else. Falls back to the old
+# path-based append if no fd was ever established (e.g. setup_logging
+# hasn't run yet, or opening it failed) -- best-effort logging must never
+# be why the install itself fails.
+log() {
+  if [[ -n "$LOG_FD" ]]; then
+    echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >&"$LOG_FD" || true
+  else
+    echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >>"$LOG_FILE" 2>/dev/null || true
+  fi
+}
 
 step() {
   STEP_NUM=$((STEP_NUM + 1))
@@ -121,34 +170,55 @@ require_root() {
   fi
 }
 
-# init_log_file (re)creates the regular file at path as an empty, real
-# file -- atomically, so it is immune to a symlink (or anything else)
-# already at that path, and immune to a race where such a symlink appears
-# in between a check and this call. It never opens/truncates through the
-# existing path at all: it creates a fresh file under a private temp name
-# in the SAME directory (so the rename below stays on one filesystem, and
-# is therefore atomic), then renames it over path. rename(2) replaces
-# whatever is at the destination -- symlink, regular file, or nothing --
-# without ever dereferencing it, which is exactly what makes this safe
-# where a plain `: >path` (or a "check -L, rm, then truncate" two-step,
-# which still has a race window between the two steps) is not. Verified
-# with a symlink-at-destination test before relying on this. Same
-# technique agent/updates/store/atomic.go already uses for pointer files.
-# Fix for the F04 finding's remaining TOCTOU gap (R02, external security
-# re-review): QRX_LOG_DIR is root-owned as of this installer version, but
-# a system first installed by an older installer may still have it
-# owned by the unprivileged qrx-agent service user at the moment this
-# runs (install_release, later in main(), is what re-secures it) -- and
-# even once root-owned, /tmp itself (this function's fallback location)
-# is world-writable with a predictable filename, an unrelated but
-# equally real symlink-attack surface this same fix closes.
+# init_log_file creates a fresh, empty regular file at path and opens a
+# file descriptor on it, exposed via the global LOG_FD -- both steps
+# happen on a private temp name (created exclusively via mktemp, so its
+# name is never predictable/guessable the way a "$$-$RANDOM"-based name
+# would be, closing a second, narrower gap the R02 re-review also flagged)
+# BEFORE that content is ever visible at the public `path` at all: the fd
+# is opened on the temp file first, and only then is the temp file
+# renamed into place. rename(2) replaces whatever is at the destination
+# -- symlink, regular file, or nothing -- without ever dereferencing it,
+# so this is safe against a symlink already at `path`; opening the fd
+# before the rename, rather than after, means there is no window at all
+# (not even a race window, unlike a create-then-open-by-path two-step)
+# where a file exists at that path but this process hasn't already bound
+# an fd to its actual inode.
+#
+# LOG_FD is the whole point: it is what makes every LATER log() call safe
+# too, not just this first write. A file descriptor is bound to the
+# underlying inode, not the path, so once it's open, nothing that later
+# happens to `path` -- including a symlink planted there at any point for
+# the rest of this script's run -- can redirect subsequent writes anywhere
+# else. An earlier version of this fix (the original F04/R02 fix) only
+# protected this first-write moment; every later log() call still
+# reopened $LOG_FILE by path each time, which the R02 re-review confirmed
+# was still exploitable (reproduced: a symlink planted after this first
+# write, before a later log() call, causes that call's content to land in
+# the symlink's target instead). Fix for that finding.
+#
+# QRX_LOG_DIR is root-owned as of this installer version, but a system
+# first installed by an older installer may still have it owned by the
+# unprivileged qrx-agent service user at the moment this runs
+# (install_release, later in main(), is what re-secures it) -- and even
+# once root-owned, /tmp itself (this function's fallback location) is
+# world-writable, an unrelated but equally real symlink-attack surface
+# this same fix closes.
 init_log_file() {
-  local path="$1" dir tmp
+  local path="$1" dir tmp fd
   dir="$(dirname "$path")"
   [[ -d "$dir" ]] || return 1
-  tmp="${path}.tmp-$$-${RANDOM}${RANDOM}"
-  (umask 022 && : >"$tmp") 2>/dev/null || return 1
-  mv -f "$tmp" "$path" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  tmp="$(mktemp "${dir}/.qrx-install-log.XXXXXX" 2>/dev/null)" || return 1
+  if ! exec {fd}>"$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  fi
+  if ! mv -f "$tmp" "$path" 2>/dev/null; then
+    eval "exec ${fd}>&-" 2>/dev/null
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  fi
+  LOG_FD="$fd"
 }
 
 setup_logging() {
@@ -491,6 +561,64 @@ create_service_user() {
   fi
 }
 
+# bootstrap_agent_ota_store lays the freshly downloaded agentd binary into
+# the OTA store's own on-disk layout (agent/updates/store package:
+# <baseDir>/agent/releases/<version>/agentd, current -> releases/<version>)
+# instead of just copying it straight to ${QRX_PREFIX}/bin/agentd, then
+# makes that fixed path a symlink into the store's "current" pointer.
+#
+# This is what makes a promoted self-update reachable at all. Before this,
+# systemd's ExecStart always exec'd a plain file at ${QRX_PREFIX}/bin/agentd
+# that only this installer ever wrote -- Store.Promote() (agent/updates/
+# store/store.go), which is what a self-update actually calls, only ever
+# atomically flips the "current" symlink *inside* the OTA store; it has no
+# way to touch anything under QRX_PREFIX. A "successful" self-update could
+# verify, stage, and promote a new agent binary correctly and still never
+# run it (the R05 finding, external security re-review). Routing the fixed
+# exec path through a one-time symlink into the store's own "current"
+# pointer means Promote()'s existing atomic rename transitively repoints
+# what ExecStart resolves to, with no per-update install.sh involvement and
+# no systemd sandbox changes needed: only the *inner* "current" symlink
+# inside QRX_DATA_DIR ever changes after this runs once, and QRX_DATA_DIR
+# is already in the unit's ReadWritePaths (see install_systemd_service) --
+# the outer symlink at ${QRX_PREFIX}/bin/agentd itself is never rewritten
+# again after this.
+#
+# Idempotent and never regresses an already-promoted version: if "current"
+# is already set (a previous install.sh run already bootstrapped it, or a
+# real OTA update has since promoted a newer version), the pointer is left
+# alone -- re-running install.sh (e.g. to fix local config) with the same
+# or an older release tarball must never move "current" backwards under a
+# self-update that already happened. This mirrors
+# store.Store.BootstrapCurrent's own no-op-if-already-set contract, the
+# Go-side counterpart of this same rule for the version *pointer* (see its
+# doc comment) -- this function is the counterpart for the *files backing
+# it*, which BootstrapCurrent deliberately never creates on its own.
+bootstrap_agent_ota_store() {
+  local extracted_agentd="$1" version="$2"
+  local store_root="${QRX_DATA_DIR}/components/agent"
+  local release_dir="${store_root}/releases/${version}"
+  local current_ptr="${store_root}/current"
+  local launcher="${QRX_PREFIX}/bin/agentd"
+
+  install -d -m 0750 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" \
+    "$store_root" "${store_root}/releases" "$release_dir"
+  install -m 0755 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" \
+    "$extracted_agentd" "${release_dir}/agentd"
+
+  # -L (a symlink node, whatever it points to) or -f (the plain-text
+  # fallback store.Store itself falls back to where symlinks aren't
+  # available) -- either means a current version is already recorded, same
+  # check as store.Store.Current()'s own os.Readlink-then-fallback.
+  if [[ ! -L "$current_ptr" && ! -f "$current_ptr" ]]; then
+    ln -s "releases/${version}" "$current_ptr"
+    chown -h "${QRX_SERVICE_USER}:${QRX_SERVICE_USER}" "$current_ptr"
+  fi
+
+  install -d -m 0755 "${QRX_PREFIX}/bin"
+  ln -sfn "${store_root}/current/agentd" "$launcher"
+}
+
 install_release() {
   local tarball="${WORKDIR}/${ASSET_NAME}"
   local extract_dir="${WORKDIR}/extracted"
@@ -499,8 +627,28 @@ install_release() {
 
   [[ -f "${extract_dir}/agentd" ]] || die "release package is missing the agentd binary -- this looks like a broken/incomplete release artifact."
 
-  install -d -m 0755 "${QRX_PREFIX}/bin"
-  install -m 0755 "${extract_dir}/agentd" "${QRX_PREFIX}/bin/agentd"
+  # The OTA store needs the agentd binary's REAL version (it becomes
+  # store.Store.Current(), which every future downgrade/replay check
+  # compares against as a semantic version -- manifest.CheckNotDowngrade's
+  # version.Compare falls back to a raw string comparison for anything
+  # that doesn't parse as one) -- never $RELEASE_VERSION verbatim, which
+  # is the literal string "local" for a QRX_LOCAL_TARBALL install (offline
+  # installs and this project's own Docker smoke test; see
+  # QRX_LOCAL_TARBALL's own comment above). "local" doesn't parse as a
+  # semantic version, so it silently loses every future lexicographic
+  # comparison against a real one (e.g. "0.0.1" < "local" as plain
+  # strings), making CheckNotDowngrade reject every subsequent update as a
+  # downgrade -- reproduced via installer-ci.yml's Docker smoke test
+  # before this fix. The tarball's own VERSION file (present in every
+  # release this project has ever built, see release.yml/installer-ci.yml's
+  # packaging steps) always has the real one, whether the tarball came
+  # from GitHub or a local file.
+  local ota_version
+  ota_version="$(tr -d '[:space:]' <"${extract_dir}/VERSION" 2>/dev/null || true)"
+  [[ -n "$ota_version" ]] || ota_version="$RELEASE_VERSION"
+
+  install -d -m 0750 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" "$QRX_DATA_DIR"
+  bootstrap_agent_ota_store "${extract_dir}/agentd" "$ota_version"
 
   if [[ -d "${extract_dir}/dashboard" ]]; then
     rm -rf "${QRX_PREFIX}/dashboard"
@@ -510,7 +658,6 @@ install_release() {
     warn "release package has no dashboard/ directory -- the web dashboard will not be available until you install one (see docs/development.md)."
   fi
 
-  install -d -m 0750 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" "$QRX_DATA_DIR"
   # Root-owned, not agent-writable -- unlike QRX_DATA_DIR, nothing in this
   # codebase currently has agentd write into QRX_LOG_DIR (it logs to
   # stdout/stderr, captured by journald); this installer is the only thing
@@ -646,7 +793,7 @@ write_config() {
   "admin_token": "${ADMIN_TOKEN}",
   "telegram": { "enabled": false, "token": "", "chat_id": "" },
   "updates": {
-    "public_key_base64": "",
+    "public_key_base64": "${QRX_TRUSTED_MANIFEST_PUBLIC_KEY_B64}",
     "source_kind": "github",
     "github_owner": "${QRX_REPO_OWNER}",
     "github_repo": "${QRX_REPO_NAME}",
@@ -655,6 +802,7 @@ write_config() {
   },
   "poll": { "node_status_seconds": 5, "network_seconds": 10, "system_seconds": 5, "version_hours": 6 },
   "is_validator_node": false,
+  "qrx_core_service_use_sudo": true,
   "log_format": "json",
   "log_level": "info"
 }
@@ -662,6 +810,47 @@ JSON
   chown "${QRX_SERVICE_USER}:${QRX_SERVICE_USER}" "$config_file"
   chmod 0640 "$config_file"
   ok "wrote configuration to ${config_file}"
+}
+
+# install_qrx_core_sudoers grants the unprivileged qrx-agent user exactly
+# enough sudo to manage qrxd.service -- nothing else -- so
+# agent/platform.Systemd (with Config.QRXCoreServiceUseSudo, set true
+# below in write_config) can actually start/stop/restart/query it without
+# running the whole Agent as root just for this one capability. Mirrors
+# installer/linux/qrx-agent-sudoers (kept as a static, human-readable
+# reference using the default username -- this generates the real rule
+# with the actual configured QRX_SERVICE_USER substituted in, the same
+# relationship install_systemd_service() below has with
+# installer/linux/qrx-agent.service).
+#
+# `visudo -c` validates the rule BEFORE it's installed where sudo will
+# actually read it: a malformed sudoers file breaks sudo for the entire
+# system, not just this one rule, so this is written to a private temp
+# file, validated, and only then installed -- never validated in place
+# after the fact. Fix for the F12 finding (external security audit):
+# this file existed in the repo already but neither install.sh nor
+# cmd/agentd ever referenced it or agent/platform.Systemd.UseSudo, so
+# Core service control could not work at all against a real qrxd.service
+# owned by a different user.
+install_qrx_core_sudoers() {
+  command -v visudo >/dev/null 2>&1 || ensure_packages sudo
+  local sudoers_file="/etc/sudoers.d/qrx-agent"
+  local tmp
+  tmp="$(mktemp)" || { warn "could not create a temp file for the qrxd.service sudoers rule -- Core service control (start/stop/restart) will not work"; return 1; }
+  cat >"$tmp" <<SUDOERS
+# Managed by install.sh -- grants ${QRX_SERVICE_USER} exactly enough sudo
+# to manage qrxd.service, nothing else. See docs/security.md's F12 note.
+${QRX_SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl start qrxd.service, /usr/bin/systemctl stop qrxd.service, /usr/bin/systemctl restart qrxd.service, /usr/bin/systemctl is-active qrxd.service
+SUDOERS
+  chmod 0440 "$tmp"
+  if ! visudo -c -f "$tmp" >>"$LOG_FILE" 2>&1; then
+    rm -f "$tmp"
+    warn "generated qrxd.service sudoers rule failed visudo validation -- not installed; Core service control (start/stop/restart) will not work"
+    return 1
+  fi
+  install -o root -g root -m 0440 "$tmp" "$sudoers_file"
+  rm -f "$tmp"
+  ok "installed ${sudoers_file} (lets ${QRX_SERVICE_USER} manage qrxd.service without running as root)"
 }
 
 # ============================================================
@@ -703,6 +892,22 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=${QRX_DATA_DIR} ${QRX_CONFIG_DIR} ${QRX_LOG_DIR}
+# ProtectSystem=strict makes the real /tmp read-only for this unit like
+# everything else outside ReadWritePaths -- but updates.Manager.Install and
+# QRXCoreUpdateManager.Update both download an update artifact to
+# os.CreateTemp("", ...), which defaults to /tmp. Without PrivateTmp, EVERY
+# self-update or QRX Core update install ever attempted against this unit
+# failed at the download step with "read-only file system", entirely
+# independent of anything else being correct -- caught by
+# installer-ci.yml's Docker smoke test's real self-update round trip (R05,
+# external security re-review), not any earlier round of review, since
+# nothing had ever exercised a real Install() call against the real
+# shipped sandbox before. PrivateTmp gives the unit its own isolated,
+# genuinely writable /tmp (a systemd-managed bind mount, set up before the
+# unit starts -- no capability needed by the unprivileged qrx-agent
+# process itself), which is both the fix and a further hardening: this
+# unit's temp files are no longer visible to other processes' /tmp either.
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
@@ -786,9 +991,15 @@ main() {
   step "Checking prerequisites"
   preflight
 
-  # Idempotency: an existing install just gets its own OTA system to
-  # handle upgrades rather than this bootstrap script re-doing that work
-  # (design brief section 29) -- see docs/installer.md#upgrades.
+  # This is a warning, not a stop: re-running install.sh on an existing
+  # install is safe (config/database are left alone -- see write_config's
+  # own idempotency check) but is a real reinstall of the binary/dashboard
+  # with a service restart, not a no-op -- the Agent's own OTA system
+  # (design brief section 29) is the better tool for a routine upgrade,
+  # but this script deliberately doesn't refuse to run so it stays usable
+  # to recover a broken/incomplete install. See docs/installer.md#upgrades
+  # (F14 fix, external security audit -- this doc previously overstated
+  # what re-running actually does; the doc was corrected, not the code).
   # A direct file check, not `systemctl list-unit-files | grep -q ...`:
   # under `set -o pipefail` (this script has it), grep -q's early exit on
   # the first match SIGPIPEs the still-writing systemctl process, and
@@ -798,8 +1009,9 @@ main() {
   # installer-ci.yml's Docker smoke test (uninstall.sh had the same bug).
   if [[ -f /etc/systemd/system/qrx-agent.service ]]; then
     warn "QRX Node Suite already appears to be installed (qrx-agent.service exists)."
-    info "Re-running this installer will not touch your existing configuration or database."
-    info "To upgrade, use the Dashboard's Settings -> Updates page, or POST /api/v1/updates/install (see docs/updates.md)."
+    info "Continuing will not touch your existing configuration or database, but WILL reinstall the"
+    info "binary/dashboard and restart qrx-agent.service -- prefer the Dashboard's Settings -> Updates"
+    info "page, or POST /api/v1/updates/install, for a routine upgrade (see docs/updates.md)."
   fi
 
   step "Finding the ${QRX_CHANNEL} release"
@@ -819,6 +1031,7 @@ main() {
 
   step "Configuring and starting services"
   write_config
+  install_qrx_core_sudoers
   install_systemd_service
 
   step "Running health checks"

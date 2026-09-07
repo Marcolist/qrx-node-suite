@@ -18,19 +18,26 @@ const (
 	UpdateStatusBlocked    UpdateStatus = "blocked" // e.g. compatibility check failed before install
 )
 
-// UpdateHistoryRecord is one row of the update_history table.
+// UpdateHistoryRecord is one row of the update_history table. JSON tags
+// match dashboard/src/api/types.ts's UpdateHistoryRecord (and every sibling
+// response type in this API, e.g. updates.CheckResult) -- this struct had
+// none at all until this fix, so it actually serialized as PascalCase
+// field names, silently breaking that already-snake_case TS contract for
+// the one code path (InstallResult.History, embedded in
+// POST /api/v1/updates/install and /rollback's responses) that ever put it
+// on the wire.
 type UpdateHistoryRecord struct {
-	ID              int64
-	Component       string
-	FromVersion     string
-	ToVersion       string
-	Channel         string
-	Timestamp       time.Time
-	Status          UpdateStatus
-	RollbackUsed    bool
-	Checksum        string
-	ManifestVersion int
-	ErrorMessage    string
+	ID              int64        `json:"id"`
+	Component       string       `json:"component"`
+	FromVersion     string       `json:"from_version"`
+	ToVersion       string       `json:"to_version"`
+	Channel         string       `json:"channel"`
+	Timestamp       time.Time    `json:"timestamp"`
+	Status          UpdateStatus `json:"status"`
+	RollbackUsed    bool         `json:"rollback_used"`
+	Checksum        string       `json:"checksum"`
+	ManifestVersion int          `json:"manifest_version"`
+	ErrorMessage    string       `json:"error_message,omitempty"`
 }
 
 // UpdateHistoryStore persists agent/updates' CHECK/DOWNLOAD/.../COMMIT or

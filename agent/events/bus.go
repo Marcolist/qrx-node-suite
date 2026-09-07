@@ -21,6 +21,20 @@ type Bus struct {
 	subs    map[int64]chan models.Event
 	nextID  int64
 	bufSize int
+
+	// MaxSubscribers caps how many subscribers TrySubscribe will accept;
+	// <= 0 means unlimited. Deliberately NOT enforced by Subscribe itself
+	// (in-process consumers -- guardian, alerts -- are trusted, fixed in
+	// number by this codebase's own design, and never attacker-influenced)
+	// -- it only bounds TrySubscribe, which is what the unauthenticated
+	// GET /api/v1/events HTTP endpoint uses (agent/api's ServeSSE caller),
+	// so an unbounded number of open connections can no longer hold this
+	// process's goroutines/memory open indefinitely (F10 fix, external
+	// security audit: "no cap on concurrent SSE connections"). Safe to
+	// set concurrently with Subscribe/TrySubscribe calls; not safe to set
+	// concurrently with itself (set it once, at startup, before serving
+	// any request).
+	MaxSubscribers int
 }
 
 // NewBus builds an event bus. bufSize is the per-subscriber channel buffer
@@ -47,10 +61,30 @@ func (b *Bus) Publish(e models.Event) {
 }
 
 // Subscribe registers a new subscriber and returns its id (for
-// Unsubscribe) and receive channel.
+// Unsubscribe) and receive channel. Never capped by MaxSubscribers -- see
+// its doc comment; use TrySubscribe for a caller that should be.
 func (b *Bus) Subscribe() (int64, <-chan models.Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.subscribeLocked()
+}
+
+// TrySubscribe is Subscribe, but refuses (ok=false, no id/channel
+// returned) once MaxSubscribers current subscribers are already
+// registered. The count check and the registration happen under the same
+// lock, so concurrent callers can never register more than MaxSubscribers
+// between them.
+func (b *Bus) TrySubscribe() (id int64, ch <-chan models.Event, ok bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.MaxSubscribers > 0 && len(b.subs) >= b.MaxSubscribers {
+		return 0, nil, false
+	}
+	id, ch = b.subscribeLocked()
+	return id, ch, true
+}
+
+func (b *Bus) subscribeLocked() (int64, chan models.Event) {
 	b.nextID++
 	id := b.nextID
 	ch := make(chan models.Event, b.bufSize)

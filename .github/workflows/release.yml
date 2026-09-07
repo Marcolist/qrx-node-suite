@@ -119,6 +119,18 @@ jobs:
           name: release-linux-${{ matrix.goarch }}
           path: ${{ env.ASSET_NAME }}
 
+      # Published separately from the tarball above (not just extracted
+      # from it downstream) because the OTA "agent" component's artifact
+      # is a raw binary -- components.Agent.Extract writes an update
+      # artifact straight to disk as-is, with no untarring step, unlike
+      # the tarball this same build also produces for install.sh's initial
+      # install. See the "release" job's "Build OTA update manifests"
+      # step, which points the agent component's URL at this asset.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentd-linux-${{ matrix.goarch }}
+          path: agentd
+
   release:
     name: Publish release
     needs: build
@@ -137,6 +149,12 @@ jobs:
     # wrong. This is that fix.
     env:
       RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY }}
+      # Deliberately a separate secret from RELEASE_SIGNING_PRIVATE_KEY --
+      # see docs/deployment.md#signing-keys and install.sh's
+      # QRX_TRUSTED_MANIFEST_PUBLIC_KEY_B64 comment for why these two
+      # signing flows (release tarball vs. OTA update manifest) are kept
+      # on independent keypairs.
+      MANIFEST_SIGNING_PRIVATE_KEY: ${{ secrets.MANIFEST_SIGNING_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -150,6 +168,24 @@ jobs:
           pattern: release-linux-*
           path: dist
           merge-multiple: true
+
+      # Downloaded to their own directories, not straight into dist/ --
+      # both agentd-linux-amd64 and agentd-linux-arm64 artifacts contain a
+      # file literally named "agentd" (the raw binary upload_artifact
+      # step in the "build" job above), so a shared destination would have
+      # the second download silently overwrite the first.
+      - uses: actions/download-artifact@v4
+        with:
+          name: agentd-linux-amd64
+          path: raw/amd64
+      - uses: actions/download-artifact@v4
+        with:
+          name: agentd-linux-arm64
+          path: raw/arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard-dist
+          path: dashboard-dist
 
       - name: Generate checksums
         working-directory: dist
@@ -195,6 +231,84 @@ jobs:
           echo "::error::RELEASE_SIGNING_PRIVATE_KEY repo secret is not set. install.sh refuses to install an unsigned release (docs/installer.md#release-security) -- publishing one now would produce a release nobody can actually install via the documented one-line command. Set the secret before tagging a release; see docs/deployment.md#signing-keys."
           exit 1
 
+      # Assembles the raw artifacts the OTA manifests below point at:
+      # components.Agent.Extract writes a self-update artifact straight to
+      # disk as-is (no untarring), so the "agent" component needs the bare
+      # binary, not the install.sh-oriented tarball; components.Dashboard.
+      # Extract expects a tar.gz of just the static assets (no wrapping
+      # directory beyond what's already in dashboard-dist/), also not the
+      # combined install.sh tarball.
+      - name: Prepare OTA update artifacts
+        run: |
+          cp raw/amd64/agentd dist/agentd-linux-amd64
+          cp raw/arm64/agentd dist/agentd-linux-arm64
+          chmod 0755 dist/agentd-linux-amd64 dist/agentd-linux-arm64
+          tar -czf dist/dashboard.tar.gz -C dashboard-dist .
+
+      # One manifest per architecture, not a shared manifest.json: the
+      # "agent" component's artifact is architecture-specific (see
+      # cmd/agentd/sources.go's buildUpdateSource, which asks for
+      # manifest-linux-<GOARCH>.json), while manifest.Manifest itself has
+      # no per-architecture field. "dashboard" is architecture-independent
+      # (same tar.gz, same checksum, listed in both).
+      - name: Build OTA update manifests
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          released_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          repo="${{ github.repository }}"
+          tag="${{ github.ref_name }}"
+          dashboard_sha="$(sha256sum dist/dashboard.tar.gz | cut -d' ' -f1)"
+          dashboard_url="https://github.com/${repo}/releases/download/${tag}/dashboard.tar.gz"
+
+          for arch in amd64 arm64; do
+            agent_sha="$(sha256sum "dist/agentd-linux-${arch}" | cut -d' ' -f1)"
+            agent_url="https://github.com/${repo}/releases/download/${tag}/agentd-linux-${arch}"
+            jq -n \
+              --arg suite_version "$version" \
+              --arg released_at "$released_at" \
+              --arg agent_url "$agent_url" --arg agent_sha "$agent_sha" \
+              --arg dash_url "$dashboard_url" --arg dash_sha "$dashboard_sha" \
+              '{
+                manifest_version: 1,
+                channel: "stable",
+                suite_version: $suite_version,
+                released_at: $released_at,
+                components: {
+                  agent: {version: $suite_version, url: $agent_url, sha256: $agent_sha, signature: ""},
+                  dashboard: {version: $suite_version, url: $dash_url, sha256: $dash_sha, signature: ""}
+                },
+                manifest_signature: ""
+              }' >"dist/manifest-linux-${arch}.json"
+          done
+
+      # Same job-level-env-then-step-if pattern as "Sign checksums" above
+      # (R01) -- MANIFEST_SIGNING_PRIVATE_KEY is a separate secret from
+      # RELEASE_SIGNING_PRIVATE_KEY (docs/deployment.md#signing-keys).
+      - name: Sign OTA update manifests
+        if: ${{ env.MANIFEST_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          echo "$MANIFEST_SIGNING_PRIVATE_KEY" > "$key_file"
+          for arch in amd64 arm64; do
+            (cd agent && go run ./cmd/sign-manifest \
+              -key "$key_file" \
+              -manifest "${GITHUB_WORKSPACE}/dist/manifest-linux-${arch}.json" \
+              -out "${GITHUB_WORKSPACE}/dist/manifest-linux-${arch}.json")
+          done
+
+      # Same reasoning as "Fail if unsigned" above: an installed Agent's
+      # manifest.VerifyManifestSignature fails closed (ErrNoPublicKey/
+      # invalid signature) on an unsigned manifest -- publishing one now
+      # would produce a release that installs fine but can never
+      # self-update, silently reintroducing the exact gap the R05 fix
+      # closed. Fail the job rather than publish that.
+      - name: Fail if OTA manifests are unsigned
+        if: ${{ env.MANIFEST_SIGNING_PRIVATE_KEY == '' }}
+        run: |
+          echo "::error::MANIFEST_SIGNING_PRIVATE_KEY repo secret is not set. Every installed Agent's OTA update manifest verification fails closed without a validly signed manifest (agent/updates/manifest.ErrNoPublicKey) -- publishing this release would produce one nobody can ever self-update from. Set the secret before tagging a release; see docs/deployment.md#signing-keys."
+          exit 1
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -202,5 +316,9 @@ jobs:
             dist/*.tar.gz
             dist/SHA256SUMS
             dist/SHA256SUMS.sig
+            dist/agentd-linux-amd64
+            dist/agentd-linux-arm64
+            dist/manifest-linux-amd64.json
+            dist/manifest-linux-arm64.json
           fail_on_unmatched_files: false
           generate_release_notes: true

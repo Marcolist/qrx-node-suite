@@ -240,6 +240,18 @@ func (m *QRXCoreUpdateManager) Update(ctx context.Context, opts UpdateOptions) (
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrNoUpdateForComponent, QRXCoreComponent)
 	}
+	// Same cross-check SwitchVersion already makes (opts.Profile.
+	// QRXCoreVersion != targetVersion, above): without it, CheckSwitchSafety
+	// validates whatever profile the caller happened to pass, not
+	// necessarily one that actually describes comp.Version -- the version
+	// this call is about to fetch and switch to. A caller (or a stale/buggy
+	// automation) could pass a profile for a version it already vetted
+	// while the manifest offers a different one, and get that unrelated
+	// profile's judgement instead of the real target's. F12 fix, external
+	// security audit.
+	if opts.Profile.QRXCoreVersion != comp.Version {
+		return nil, fmt.Errorf("qrx_core: compatibility profile is for %s, but the manifest offers %s -- refusing to switch-safety-check the wrong version's profile", opts.Profile.QRXCoreVersion, comp.Version)
+	}
 
 	st := m.store()
 	fromVersion, _, err := st.Current()

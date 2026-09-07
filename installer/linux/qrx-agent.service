@@ -35,6 +35,12 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/qrx-node-suite/var /etc/qrx-node-suite
+# updates.Manager.Install and QRXCoreUpdateManager.Update both download an
+# update artifact to os.CreateTemp("", ...) -- /tmp by default, which
+# ProtectSystem=strict otherwise makes read-only for this unit like
+# everything outside ReadWritePaths. Without this, every self-update or
+# QRX Core update install fails at the download step.
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

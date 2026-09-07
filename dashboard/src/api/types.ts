@@ -213,6 +213,6 @@ export interface UpdateHistoryRecord {
 }
 
 export interface InstallResult {
-  History: UpdateHistoryRecord;
-  PendingRestart: boolean;
+  history: UpdateHistoryRecord;
+  pending_restart: boolean;
 }

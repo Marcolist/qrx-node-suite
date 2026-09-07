@@ -1,9 +1,15 @@
 # Configuration
 
 The Agent reads a single JSON config file (`-config path` or
-`QRX_AGENT_CONFIG=path`); every field is optional and falls back to
-`config.Default()` (Mock mode). See `agent/config/config.go` for the
-authoritative field list. Configuration is itself versioned
+`QRX_AGENT_CONFIG=path`); every field within that file is optional and
+falls back to `config.Default()` (Mock mode). Not passing `-config`/
+`QRX_AGENT_CONFIG` at all is the same thing, deliberately, for local Mock-
+mode development -- but passing a *path* that doesn't exist or isn't
+readable is a hard startup failure (`cmd/agentd/main.go`'s
+`requireConfigPathExists`), not a silent fallback to the same defaults: a
+real, intended config was named and couldn't be read, which is not the
+same situation as none being requested at all. See `agent/config/config.go`
+for the authoritative field list. Configuration is itself versioned
 (`config_schema_version`) and migrated on load -- see
 `docs/updates.md#configuration-and-database-migrations`.
 

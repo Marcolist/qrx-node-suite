@@ -55,16 +55,27 @@ sudo bash install.sh
 
 | Path | Contents |
 |---|---|
-| `/opt/qrx-node-suite/bin/agentd` | The Agent binary |
+| `/opt/qrx-node-suite/bin/agentd` | Symlink into the OTA store's active agent release (see below) -- not a plain binary file |
 | `/opt/qrx-node-suite/dashboard/` | Built dashboard static assets |
 | `/opt/qrx-node-suite/bin/uninstall.sh` | Uninstaller (see below) |
 | `/etc/qrx-node-suite/agent.json` | Configuration (root + `qrx-agent` readable only) |
 | `/var/lib/qrx-node-suite/` | SQLite database, OTA component store |
+| `/var/lib/qrx-node-suite/components/agent/` | The agent's own OTA store: `releases/<version>/agentd`, `current -> releases/<version>` |
 | `/var/log/qrx-node-suite/install.log` | Installer's own log (root-owned; see [Installer log directory](#installer-log-directory)) |
 | `/etc/systemd/system/qrx-agent.service` | systemd unit |
 | `/usr/local/bin/qrx-node-suite` | `status` / `logs` / `uninstall` convenience wrapper |
 
 This mirrors `installer/linux/qrx-agent.service`'s existing layout, not a new one.
+
+`/opt/qrx-node-suite/bin/agentd` is set up once, at install time
+(`install.sh`'s `bootstrap_agent_ota_store()`), as a symlink into
+`/var/lib/qrx-node-suite/components/agent/current/agentd` rather than a
+plain copy of the downloaded binary -- this is what lets a self-update
+(`docs/updates.md#self-binary-components-agent-adapters`) actually take
+effect: systemd's `ExecStart` always execs this same fixed path, and
+`current` is exactly what an OTA promotion atomically repoints. Nothing
+about running or managing the service changes because of this; it only
+matters if you're inspecting the filesystem directly.
 
 ## QRX Core
 
@@ -107,6 +118,14 @@ itself. Set `QRX_DASHBOARD_BIND=lan` to bind `0.0.0.0:8787` instead (LAN-reachab
 during install, or edit `listen_addr` in `agent.json` and `systemctl restart
 qrx-agent` afterward. `install.sh` never opens this to the wider internet and never
 touches your firewall -- see [Firewall](#firewall).
+
+Access it by IP (`http://<this-machine's-LAN-IP>:8787`, shown at the end of a
+`QRX_DASHBOARD_BIND=lan` install), not by hostname: `agent/api`'s
+`RequireAllowedHost` middleware rejects any request whose `Host` header
+isn't a loopback or private-network address (defense against DNS
+rebinding -- see `docs/security.md`'s F09 note), which does not include a
+custom DNS name or `.local`/mDNS hostname you may have pointed at this
+machine yourself.
 
 ## Release security
 
@@ -153,31 +172,73 @@ re-secures the directory's ownership, that symlink would later be followed and
 truncated by root -- an unprivileged-to-root arbitrary-file-truncation primitive.
 `install.sh`'s `setup_logging()` additionally creates `install.log` via
 `init_log_file()`, which never opens or truncates through the existing path at
-all: it writes a fresh file under a private temp name in the same directory,
-then atomically renames it over `install.log`'s path. `rename(2)` replaces
-whatever is at the destination -- symlink, regular file, or nothing -- without
-ever dereferencing it, so this is safe against a symlink already there **and**
-against one planted in a race by a still-running compromised process at any
-point up to the rename (an earlier "check for a symlink, remove it, then
-truncate" version of this fix closed the first case but still had a race
-window between the check and the truncate for the second -- see
-`installer/test/test-detection.sh`'s concurrent-attacker regression test,
-which reproducibly broke that earlier version within single-digit iterations
-and now runs clean). This means even a system that was *first* installed by an
-older, vulnerable `install.sh` -- and so still has an agent-owned log directory
-left over from that earlier run, with `qrx-agent` still actively running and
-able to race this exact window -- is safe the moment it's re-run with a
-patched `install.sh`.
+all: it creates a fresh file under a private, `mktemp`-generated temp name in
+the same directory (so its name is never predictable the way an earlier
+`"$$-$RANDOM"`-based name was), **opens a file descriptor on it first**, and
+only then atomically renames it over `install.log`'s path. `rename(2)`
+replaces whatever is at the destination -- symlink, regular file, or nothing
+-- without ever dereferencing it, so this is safe against a symlink already
+there; opening the descriptor before the rename (not after) means there is no
+window at all, race or otherwise, between "the safe file exists at that path"
+and "this process has an fd bound to its actual inode".
+
+That descriptor (`LOG_FD`) is what makes every *later* `log()` call safe too,
+not just this first write: a file descriptor is bound to the underlying
+inode, not the path, so `log()` writes through it directly rather than
+reopening `install.log` by path each time. Two earlier, narrower versions of
+this fix each closed one gap but left another: a "check for a symlink, remove
+it, then truncate" version closed a pre-existing symlink but had a race window
+between the check and the truncate; the atomic-rename version that replaced it
+closed that race for the *first* write, but every later `log()` call
+throughout the rest of the install still reopened `install.log` by path,
+so a symlink planted at any point *after* that first write -- QRX_LOG_DIR can
+stay agent-writable until `install_release()` re-secures it, much later in
+`main()` -- would have every subsequent append follow it (reproduced: see
+`installer/test/test-detection.sh`'s regression tests, which reproducibly
+broke each earlier version before this fix and now run clean). This means
+even a system that was *first* installed by an older, vulnerable `install.sh`
+-- and so still has an agent-owned log directory left over from that earlier
+run, with `qrx-agent` still actively running for the entire duration of a
+later re-run -- is safe the moment it's re-run with a patched `install.sh`.
 
 ## Upgrades
 
-Running `install.sh` again when QRX Node Suite is already installed does not
-re-install or touch your existing configuration/database -- it detects
-`qrx-agent.service` and tells you to use the Agent's own OTA system instead (the
-Dashboard's Settings -> Updates page, or `POST /api/v1/updates/install`; see
-`docs/updates.md`), which already handles staged, checksummed, signed, rollback-safe
-upgrades in depth. The bootstrap installer deliberately doesn't duplicate that
-logic.
+The Agent's own OTA system (the Dashboard's Settings -> Updates page, or
+`POST /api/v1/updates/install`; see `docs/updates.md`) is the supported way
+to upgrade an already-installed QRX Node Suite: staged, checksummed,
+signed, and rollback-safe, with an automatic revert if the new version
+fails its health check. Prefer it over re-running `install.sh`.
+
+Re-running `install.sh` on an already-installed system is still safe, but
+it is **not** a no-op, and does **not** exactly match "detects an existing
+install and stops" -- it prints a warning naming the OTA system above, then
+continues:
+
+- `/etc/qrx-node-suite/agent.json` and everything under
+  `/var/lib/qrx-node-suite` (the database and OTA component store) are left
+  untouched -- `write_config()` returns immediately if a config file
+  already exists there.
+- The freshly downloaded release's `agentd` binary, and its
+  `dashboard/` assets, ARE (re-)installed: the agent binary is added to the
+  OTA store as a new release (`bootstrap_agent_ota_store()`, harmless and
+  additive -- it never moves the store's `current` pointer backward if a
+  real self-update has since promoted something newer) and
+  `/opt/qrx-node-suite/dashboard` is replaced outright with whatever the
+  re-run downloaded. If a dashboard OTA update has ever been promoted
+  through the store, this has no visible effect (`cmd/agentd`'s handler
+  only falls back to this directory when the store has nothing active yet
+  -- see `docs/updates.md#dashboard-and-compatibility-profiles`); if one
+  never has, a re-run can change what's actually served.
+- The systemd unit is rewritten and **`qrx-agent.service` is restarted**
+  every time, even if nothing about it actually changed.
+
+In short: your configuration and data are safe, but a re-run is a real
+reinstall of the software itself, with a service restart, not a pure
+detect-and-stop. This document previously claimed the stricter behavior;
+this section was corrected to match the actual code rather than the other
+way around, since the OTA system above already exists and is the better
+tool for a routine upgrade in any case (fix for an external audit's F14
+finding).
 
 ## Uninstalling
 

@@ -98,9 +98,12 @@ generate each once with `agent/cmd/gen-signing-key`, and never let a private
 key touch anything except the machine/secret store that signs with it:
 
 1. **OTA update manifest signing** (`agent/updates/manifest`,
-   `docs/updates.md#update-manifest`): the public key goes into every deployed
-   Agent's `updates.public_key_base64` config; the private key signs update
-   manifests via `agent/cmd/sign-manifest`. See
+   `docs/updates.md#update-manifest`): the public key is compiled into
+   `install.sh` (`QRX_TRUSTED_MANIFEST_PUBLIC_KEY_B64`), which writes it into
+   every deployed Agent's `updates.public_key_base64` config at install time;
+   the private key signs update manifests via `agent/cmd/sign-manifest`, run
+   by `.github/workflows/release.yml`'s "Sign OTA update manifests" step
+   using the `MANIFEST_SIGNING_PRIVATE_KEY` repository secret. See
    `docs/development.md#signing-a-manifest-for-local-testing` and
    `docs/security.md`.
 2. **Release/bootstrap-installer signing** (`docs/installer.md#release-security`):
@@ -112,5 +115,13 @@ key touch anything except the machine/secret store that signs with it:
    `install.sh`'s embedded public key together -- old installer copies would
    otherwise reject new releases signed with a rotated key.
 
-These may be the same keypair or different ones; keeping them separate means a
-compromise of one signing flow doesn't automatically compromise the other.
+These are deliberately different keypairs (and different repository
+secrets): a compromise of one signing flow -- e.g. whatever signs releases
+-- must not, by itself, let an attacker push a malicious self-update to
+every already-installed Agent, or vice versa. Rotating the manifest key
+needs the same two-sided update as the release key above: a new
+`MANIFEST_SIGNING_PRIVATE_KEY` secret and a matching new
+`QRX_TRUSTED_MANIFEST_PUBLIC_KEY_B64` in `install.sh`, and every
+already-installed Agent needs its `updates.public_key_base64` updated too
+(there is no remote key-rotation mechanism -- see `docs/security.md`'s
+threat model for why that's out of scope for now).

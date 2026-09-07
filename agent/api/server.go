@@ -49,6 +49,24 @@ type Deps struct {
 	// action happened).
 	RestartQRXService func(ctx context.Context) error
 
+	// RequestSelfRestart is called after a self-binary component (agent,
+	// adapter_*) Install/Rollback returns InstallResult.PendingRestart ==
+	// true: staging/promoting a self-binary update only flips a pointer in
+	// the OTA store, and it's this process's own exit (letting the
+	// systemd Restart=always supervisor start a fresh one, landing on the
+	// newly promoted binary via ${QRX_PREFIX}/bin/agentd's symlink into
+	// the OTA store's "current" release -- see cmd/agentd/main.go and
+	// install.sh's install_release()) that actually makes the promotion
+	// take effect. Before this existed, nothing ever read
+	// PendingRestart at all: a "successful" self-update verified, staged,
+	// and promoted correctly but had no way to ever actually run (the R05
+	// finding, external security re-review). nil is a safe no-op (tests
+	// and any deployment that doesn't want auto-restart-on-update can
+	// leave it unset); the handler still returns pending_restart: true in
+	// the response either way, so a caller can always act on it manually
+	// (e.g. `systemctl restart qrx-agent`) if this isn't wired up.
+	RequestSelfRestart func()
+
 	Log *slog.Logger
 }
 
@@ -98,7 +116,12 @@ func NewMux(d *Deps) http.Handler {
 
 	mux.HandleFunc("POST /api/v1/services/qrx/restart", RequireAdmin(d.AdminToken, d.handleServiceRestart))
 
-	return mux
+	// Wraps every route above, including /health: a DNS-rebinding attacker
+	// can reach any of them with the right Host header once rebound, so
+	// this check has to cover the whole mux, not just the mutating
+	// RequireAdmin-gated ones. See RequireAllowedHost's doc comment (F09
+	// fix, external security audit).
+	return RequireAllowedHost(mux)
 }
 
 func (d *Deps) handleHealth(w http.ResponseWriter, r *http.Request) {
