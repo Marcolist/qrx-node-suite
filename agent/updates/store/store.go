@@ -39,6 +39,9 @@ func (s *Store) CurrentDir() (string, error) {
 // artifact format (see agent/updates/components for per-component
 // staging/extraction).
 func (s *Store) Stage(version string) (dir string, err error) {
+	if err := s.validate(); err != nil {
+		return "", err
+	}
 	dir = s.ReleaseDir(version)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("stage %s: create release dir: %w", version, err)
@@ -103,6 +106,9 @@ func (s *Store) Promote() error {
 // download or extract: the version is already on disk and the operation is
 // just an atomic pointer swap, same as Promote's.
 func (s *Store) PromoteVersion(version string) error {
+	if err := s.validate(); err != nil {
+		return err
+	}
 	if _, err := os.Stat(s.ReleaseDir(version)); err != nil {
 		return fmt.Errorf("promote %s: not installed: %w", version, err)
 	}
@@ -148,6 +154,9 @@ func (s *Store) RollbackToPrevious() error {
 // newest-looking-first is NOT guaranteed (sorted lexically) -- callers
 // needing semantic order should sort with agent/version.Compare.
 func (s *Store) InstalledVersions() ([]string, error) {
+	if err := s.validate(); err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(s.releasesRoot())
 	if err != nil {
 		if os.IsNotExist(err) {

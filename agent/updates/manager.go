@@ -131,6 +131,21 @@ type CheckResult struct {
 // available, compatible, and/or blocked. This is exactly what
 // POST /api/v1/updates/plan is a batch of -- see Plan.
 func (m *Manager) Check(ctx context.Context, component string) (CheckResult, error) {
+	// component reaches here straight from an UNAUTHENTICATED HTTP body
+	// (POST /api/v1/updates/check and /updates/plan, which are
+	// intentionally public read-only endpoints -- see agent/api/server.go).
+	// It must be validated against the known-component allowlist before
+	// anything derives a filesystem path from it: m.storeFor(component)
+	// below joins it onto BaseDir, so an unvalidated "../../../etc"-style
+	// value would let an anonymous caller make Store read a pointer file
+	// named "current"/"previous" from an attacker-chosen directory outside
+	// BaseDir and get its contents back in the JSON response. Rollback
+	// already guards this way (see rollback.go); Install is safe because it
+	// only reaches storeFor after confirming component is a key in the
+	// manifest, which is itself signature-verified. Check had no such gate.
+	if _, ok := m.Controllers[component]; !ok {
+		return CheckResult{}, fmt.Errorf("%w: %s", ErrUnknownComponent, component)
+	}
 	channel, err := m.Policy.Channel(ctx, component)
 	if err != nil {
 		return CheckResult{}, err

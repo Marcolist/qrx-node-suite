@@ -390,6 +390,35 @@ func TestCheckReportsCheckErrorInsteadOfFailingOutright(t *testing.T) {
 	}
 }
 
+// TestCheckRejectsUnknownComponentBeforeTouchingStore is a regression test
+// for the F03 finding (external security audit): POST /api/v1/updates/check
+// and /updates/plan are intentionally unauthenticated (docs/updates.md#update-status),
+// so Check must reject any component name that isn't a registered
+// Controller BEFORE ever building a store.Store for it -- otherwise an
+// anonymous caller could pass a "../"-style component and have
+// m.storeFor(component) resolve outside BaseDir (see
+// agent/updates/store's ErrInvalidComponent test for the store-layer half
+// of this defense). This proves the rejection happens at the Manager layer,
+// for a name that isn't even path-traversal-shaped (a component simply not
+// in Controllers), matching the same allowlist Rollback already enforces.
+func TestCheckRejectsUnknownComponentBeforeTouchingStore(t *testing.T) {
+	env := newTestEnv(t, map[string]components.Controller{"dashboard": &fakeController{}})
+
+	for _, bad := range []string{"../../etc", "..", "unknown-component", ""} {
+		_, err := env.mgr.Check(context.Background(), bad)
+		if !errors.Is(err, updates.ErrUnknownComponent) {
+			t.Errorf("Check(%q) error = %v, want ErrUnknownComponent", bad, err)
+		}
+	}
+
+	// Plan must reject the same way for every component in the batch, not
+	// silently skip the bad one and return partial results.
+	_, err := env.mgr.Plan(context.Background(), []string{"dashboard", "../../etc"})
+	if !errors.Is(err, updates.ErrUnknownComponent) {
+		t.Errorf("Plan with a traversal component = %v, want ErrUnknownComponent", err)
+	}
+}
+
 func sha256Hex(t *testing.T, s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])

@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -180,5 +181,58 @@ func TestInstalledVersionsEmptyBeforeAnyStage(t *testing.T) {
 	}
 	if len(versions) != 0 {
 		t.Errorf("expected no installed versions, got %v", versions)
+	}
+}
+
+// TestComponentPathTraversalRejected is a regression test for the F03
+// finding (external security audit): a component name reaching Store
+// unvalidated let filepath.Join(baseDir, component) resolve outside
+// baseDir, so Current()/Previous() would read a pointer file named
+// "current"/"previous" from an attacker-chosen directory instead of
+// failing. The primary fix is agent/updates.Manager.Check validating
+// component against its Controllers allowlist before ever calling
+// store.New; this test exercises the store layer's own defense-in-depth
+// (Store.validate) directly, since that's the last line of defense for any
+// future caller that reaches store.New with unvalidated input.
+func TestComponentPathTraversalRejected(t *testing.T) {
+	base := t.TempDir()
+
+	// Plant a file OUTSIDE base that a traversal could read if unvalidated:
+	// baseDir/agent-updates/../../outside/current would resolve to
+	// <parent-of-base>/outside/current.
+	outsideDir := filepath.Join(filepath.Dir(base), "outside-"+filepath.Base(base))
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("mkdir outside dir: %v", err)
+	}
+	defer os.RemoveAll(outsideDir)
+	secret := filepath.Join(outsideDir, "current")
+	if err := os.WriteFile(secret, []byte("SECRET-VERSION-STRING\n"), 0o644); err != nil {
+		t.Fatalf("write outside secret: %v", err)
+	}
+
+	traversal := "../" + filepath.Base(outsideDir)
+	s := store.New(base, traversal)
+
+	if v, ok, err := s.Current(); err == nil {
+		t.Fatalf("Current() with traversal component = %q, %v, nil error; want ErrInvalidComponent, got value read: %q", v, ok, v)
+	} else if !errors.Is(err, store.ErrInvalidComponent) {
+		t.Fatalf("Current() error = %v; want errors.Is(err, store.ErrInvalidComponent)", err)
+	}
+
+	if _, err := s.Stage("1.0.0"); !errors.Is(err, store.ErrInvalidComponent) {
+		t.Fatalf("Stage() error = %v; want ErrInvalidComponent", err)
+	}
+	if _, err := s.InstalledVersions(); !errors.Is(err, store.ErrInvalidComponent) {
+		t.Fatalf("InstalledVersions() error = %v; want ErrInvalidComponent", err)
+	}
+	if err := s.PromoteVersion("1.0.0"); !errors.Is(err, store.ErrInvalidComponent) {
+		t.Fatalf("PromoteVersion() error = %v; want ErrInvalidComponent", err)
+	}
+
+	for _, bad := range []string{"", ".", "..", "..\\outside", "sub/dir", "a/../../etc"} {
+		s := store.New(base, bad)
+		if _, _, err := s.Current(); !errors.Is(err, store.ErrInvalidComponent) {
+			t.Errorf("component %q: Current() error = %v; want ErrInvalidComponent", bad, err)
+		}
 	}
 }

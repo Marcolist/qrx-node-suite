@@ -15,6 +15,9 @@ import (
 // plain text file containing just the version string. Returns ok=false, no
 // error, if the pointer doesn't exist yet.
 func (s *Store) readPointer(name string) (v string, ok bool, err error) {
+	if err := s.validate(); err != nil {
+		return "", false, err
+	}
 	path := s.pointerPath(name)
 	target, err := os.Readlink(path)
 	if err == nil {
@@ -44,6 +47,9 @@ func (s *Store) readPointer(name string) (v string, ok bool, err error) {
 // half-updated pointer -- readers see either the old or the new target,
 // never a partial one.
 func (s *Store) writePointerAtomic(name, version string) error {
+	if err := s.validate(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(s.Root(), 0o755); err != nil {
 		return fmt.Errorf("create component root: %w", err)
 	}
