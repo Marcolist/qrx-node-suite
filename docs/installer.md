@@ -195,13 +195,42 @@ later re-run -- is safe the moment it's re-run with a patched `install.sh`.
 
 ## Upgrades
 
-Running `install.sh` again when QRX Node Suite is already installed does not
-re-install or touch your existing configuration/database -- it detects
-`qrx-agent.service` and tells you to use the Agent's own OTA system instead (the
-Dashboard's Settings -> Updates page, or `POST /api/v1/updates/install`; see
-`docs/updates.md`), which already handles staged, checksummed, signed, rollback-safe
-upgrades in depth. The bootstrap installer deliberately doesn't duplicate that
-logic.
+The Agent's own OTA system (the Dashboard's Settings -> Updates page, or
+`POST /api/v1/updates/install`; see `docs/updates.md`) is the supported way
+to upgrade an already-installed QRX Node Suite: staged, checksummed,
+signed, and rollback-safe, with an automatic revert if the new version
+fails its health check. Prefer it over re-running `install.sh`.
+
+Re-running `install.sh` on an already-installed system is still safe, but
+it is **not** a no-op, and does **not** exactly match "detects an existing
+install and stops" -- it prints a warning naming the OTA system above, then
+continues:
+
+- `/etc/qrx-node-suite/agent.json` and everything under
+  `/var/lib/qrx-node-suite` (the database and OTA component store) are left
+  untouched -- `write_config()` returns immediately if a config file
+  already exists there.
+- The freshly downloaded release's `agentd` binary, and its
+  `dashboard/` assets, ARE (re-)installed: the agent binary is added to the
+  OTA store as a new release (`bootstrap_agent_ota_store()`, harmless and
+  additive -- it never moves the store's `current` pointer backward if a
+  real self-update has since promoted something newer) and
+  `/opt/qrx-node-suite/dashboard` is replaced outright with whatever the
+  re-run downloaded. If a dashboard OTA update has ever been promoted
+  through the store, this has no visible effect (`cmd/agentd`'s handler
+  only falls back to this directory when the store has nothing active yet
+  -- see `docs/updates.md#dashboard-and-compatibility-profiles`); if one
+  never has, a re-run can change what's actually served.
+- The systemd unit is rewritten and **`qrx-agent.service` is restarted**
+  every time, even if nothing about it actually changed.
+
+In short: your configuration and data are safe, but a re-run is a real
+reinstall of the software itself, with a service restart, not a pure
+detect-and-stop. This document previously claimed the stricter behavior;
+this section was corrected to match the actual code rather than the other
+way around, since the OTA system above already exists and is the better
+tool for a routine upgrade in any case (fix for an external audit's F14
+finding).
 
 ## Uninstalling
 

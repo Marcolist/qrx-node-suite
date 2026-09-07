@@ -913,9 +913,15 @@ main() {
   step "Checking prerequisites"
   preflight
 
-  # Idempotency: an existing install just gets its own OTA system to
-  # handle upgrades rather than this bootstrap script re-doing that work
-  # (design brief section 29) -- see docs/installer.md#upgrades.
+  # This is a warning, not a stop: re-running install.sh on an existing
+  # install is safe (config/database are left alone -- see write_config's
+  # own idempotency check) but is a real reinstall of the binary/dashboard
+  # with a service restart, not a no-op -- the Agent's own OTA system
+  # (design brief section 29) is the better tool for a routine upgrade,
+  # but this script deliberately doesn't refuse to run so it stays usable
+  # to recover a broken/incomplete install. See docs/installer.md#upgrades
+  # (F14 fix, external security audit -- this doc previously overstated
+  # what re-running actually does; the doc was corrected, not the code).
   # A direct file check, not `systemctl list-unit-files | grep -q ...`:
   # under `set -o pipefail` (this script has it), grep -q's early exit on
   # the first match SIGPIPEs the still-writing systemctl process, and
@@ -925,8 +931,9 @@ main() {
   # installer-ci.yml's Docker smoke test (uninstall.sh had the same bug).
   if [[ -f /etc/systemd/system/qrx-agent.service ]]; then
     warn "QRX Node Suite already appears to be installed (qrx-agent.service exists)."
-    info "Re-running this installer will not touch your existing configuration or database."
-    info "To upgrade, use the Dashboard's Settings -> Updates page, or POST /api/v1/updates/install (see docs/updates.md)."
+    info "Continuing will not touch your existing configuration or database, but WILL reinstall the"
+    info "binary/dashboard and restart qrx-agent.service -- prefer the Dashboard's Settings -> Updates"
+    info "page, or POST /api/v1/updates/install, for a routine upgrade (see docs/updates.md)."
   fi
 
   step "Finding the ${QRX_CHANNEL} release"

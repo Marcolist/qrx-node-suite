@@ -47,6 +47,7 @@ threat model above.
 | **Installer log symlink attack** (a compromised, unprivileged `qrx-agent` process plants a symlink at `install.log`'s path so a later root-run `install.sh` write follows it instead of the real log file) | `QRX_LOG_DIR` is root-owned (`root:qrx-agent`, mode `0750`), not agent-writable, so `qrx-agent` can no longer place anything there at all; `setup_logging()` creates `install.log` via `init_log_file()`, which opens a file descriptor (`LOG_FD`) on a private `mktemp`-generated temp file *before* that file is ever visible at the public path, then atomically `rename(2)`s it into place -- safe against both a symlink already present and one raced into place mid-install. Critically, every `log()` call for the rest of the install writes through that same held descriptor, never by reopening `install.log`'s path -- a file descriptor is bound to the underlying inode, not the path, so a symlink planted at *any later point* (not just before the first write) can no longer redirect anything. Covers a system upgraded from an older, vulnerable installer that still has an agent-owned log directory left over from its first install. As of the fix for an external audit's F04 finding, hardened by two rounds of external re-review: R02 first closed the race between checking for a symlink and truncating through it (an atomic rename replaced that check-then-act pattern), then a second re-review found the atomic rename alone only protected the *first* write -- every later `log()` call still reopened the path each time, reproducibly exploitable, closed by moving to a held file descriptor. See `docs/installer.md#installer-log-directory`. |
 | **Uninstaller delete-target hijack** (a compromised, unprivileged `qrx-agent` process points `uninstall.sh --remove-qrx-core`'s marker file at an arbitrary directory, which is then `rm -rf`'d as root) | The marker (`qrx-core-installed-by-this-installer`) lives under `QRX_CONFIG_DIR` (`root:qrx-agent`, mode `0750`), never the agent-writable `QRX_DATA_DIR`, so `qrx-agent` cannot plant or rewrite it at all. As a second, independent line of defense, `uninstall.sh` resolves the marker's content (following any symlinks) and refuses to remove anything that doesn't fall under the documented QRX Core install root (`/opt/qrx`) -- never "/", "/etc", or a symlink escape. As of the fix for an external audit's F05 finding; see `docs/installer.md#qrx-core-removal-safety`. |
 | **`--remove-qrx-core` silently doing nothing when combined with `--purge-data`** (moving the F05 marker under `QRX_CONFIG_DIR` meant `--purge-data`'s `rm -rf` of that whole directory could delete the marker before `--remove-qrx-core` ever read it -- an operator explicitly asking for both, e.g. when decommissioning a machine, would end up with QRX Core silently left behind) | `main()` now runs `remove_qrx_core` before `purge_data`, so the marker is always read while it still exists. As of the fix for R04, an external re-review of the F05 fix; see `docs/installer.md#qrx-core-removal-safety`. |
+| **Documentation overstating what re-running `install.sh` does** (`docs/installer.md#upgrades` claimed a re-run "does not re-install or touch your existing configuration/database", implying a pure detect-and-stop, when the actual code only warns before continuing through `install_release`/`install_systemd_service` regardless -- reinstalling the binary and dashboard and restarting `qrx-agent.service` every time, outside the OTA system's staged/health-checked/rollback-safe path, even though configuration and the database genuinely are left alone) | Not a code bug in the sense of doing something unsafe -- every non-idempotent side effect (reinstalling the binary/dashboard, restarting the service) is itself safe, just not what the docs promised. Fixed by correcting the documentation and the script's own runtime warning message to describe what re-running actually does, rather than restricting the installer to match an overstated claim: the Agent's own OTA system already exists and is the better tool for a routine upgrade, and this script deliberately stays willing to run so it remains usable to recover a broken/incomplete first install. As of the fix for an external audit's F14 finding; see `docs/installer.md#upgrades`. |
 
 ## Hard guarantees (detail)
 
@@ -82,10 +83,12 @@ Expanding on [`SECURITY.md`](../SECURITY.md)'s summary:
 ## External audit: confirmed findings not yet fixed
 
 An external security audit of this codebase (16 findings, F01-F16) has been
-worked through in priority order: F01-F05, F07, F08, and F11 are fixed
-above, each with a regression test that fails against the pre-fix code;
-F13 is partially fixed (see [Hard guarantees](#hard-guarantees-detail)
-item 7 for what's fixed, and below for what's still deferred). The
+worked through in priority order: F01-F05, F07, F08, F11, and F14 are
+fixed above, each with a regression test that fails against the pre-fix
+code (F14, a documentation-vs-code mismatch, is verified by the docs now
+matching the actual behavior rather than a test); F13 is partially fixed
+(see [Hard guarantees](#hard-guarantees-detail) item 7 for what's fixed,
+and below for what's still deferred). The
 remaining findings were independently verified against the current source
 (never taken on faith from the report) and are confirmed real, but are
 deferred rather than fixed in the same pass -- each for a reason noted below,
@@ -146,18 +149,6 @@ appended to an already-large change.
   (a second `/ready` endpoint? redefine `/health`'s semantics, breaking
   anything that already polls it as pure liveness?) this document
   shouldn't make unilaterally.
-- **F14 -- re-running `install.sh` doesn't match its own documentation.**
-  Confirmed: `docs/installer.md#upgrades` says re-running `install.sh`
-  "does not re-install or touch your existing configuration/database", but
-  the actual code only *warns* when it detects an existing install
-  (`main()`'s `if [[ -f /etc/systemd/system/qrx-agent.service ]]` check)
-  and then proceeds through `install_release`/`install_systemd_service`
-  regardless, overwriting the binary, dashboard, and systemd unit outside
-  the OTA system's staged/health-checked/rollback-safe path. Deferred:
-  the fix is either making the installer actually stop (matching the
-  docs) or correcting the docs to match the code -- a product decision,
-  not fixed here to avoid changing installer behavior without that
-  decision.
 - **F15 -- npm advisories.** `dashboard/package.json` exists but no
   lockfile is currently committed, so a reachability assessment (does this
   project's actual production usage hit the vulnerable code path in each
