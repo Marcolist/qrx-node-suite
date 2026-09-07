@@ -214,7 +214,7 @@ func run() error {
 		updateComponents = append(updateComponents, "adapter_"+activeAdapterName)
 	}
 
-	controllers := buildControllers(componentsBaseDir, registry, activeAdapterName, matrix, &qrxCoreVersion)
+	controllers := buildControllers(componentsBaseDir, registry, activeAdapterName, matrix, &qrxCoreVersion, logger)
 
 	mgr := &updates.Manager{
 		Source: updateSource, PublicKey: publicKey,
@@ -309,9 +309,29 @@ func parsePublicKey(b64 string) (ed25519.PublicKey, error) {
 // component. qrxCoreVersion is a pointer so the compatibility_profile
 // controller's Reload callback can update it in place if an operator ships
 // a corrected profile for a version this Agent has already detected.
-func buildControllers(baseDir string, registry *adapters.Registry, activeAdapterName string, matrix *version.Matrix, qrxCoreVersion *string) map[string]components.Controller {
+//
+// Also bootstrap-registers "agent" and any active adapter's store to their
+// RunningVersion (store.Store.BootstrapCurrent) -- a no-op once a real OTA
+// update has ever promoted something, but on a freshly bootstrapped
+// install (never gone through Stage/Promote at all) this is what makes
+// Current() non-empty from the very first update check, restoring
+// manifest.CheckNotDowngrade/CheckNotReplayed's protection on that first
+// check instead of leaving both silently disabled (see BootstrapCurrent's
+// doc comment; R05 fix, external security re-review). Deliberately NOT
+// done for "dashboard": its install-time content lives outside the OTA
+// store entirely (cfg.DashboardDir, copied there by install.sh), and
+// cmd/agentd's dashboard handler (the F07 fix) already falls back to that
+// directory specifically when the store has nothing real to serve --
+// bootstrap-registering a version with no corresponding on-disk release
+// would defeat that fallback and break dashboard serving on every fresh
+// install.
+func buildControllers(baseDir string, registry *adapters.Registry, activeAdapterName string, matrix *version.Matrix, qrxCoreVersion *string, logger *slog.Logger) map[string]components.Controller {
+	agentStore := storeFor(baseDir, "agent")
+	if err := agentStore.BootstrapCurrent(agentVersion); err != nil {
+		logger.Warn("could not bootstrap-register the running agent version into the OTA store", "error", err)
+	}
 	c := map[string]components.Controller{
-		"agent":     &components.Agent{Store: storeFor(baseDir, "agent"), RunningVersion: agentVersion},
+		"agent":     &components.Agent{Store: agentStore, RunningVersion: agentVersion},
 		"dashboard": &components.Dashboard{Store: storeFor(baseDir, "dashboard")},
 	}
 	if activeAdapterName != "" {
@@ -320,8 +340,14 @@ func buildControllers(baseDir string, registry *adapters.Registry, activeAdapter
 		if active != nil {
 			adapterVersion = active.Version()
 		}
+		adapterStore := storeFor(baseDir, "adapter_"+activeAdapterName)
+		if adapterVersion != "" {
+			if err := adapterStore.BootstrapCurrent(adapterVersion); err != nil {
+				logger.Warn("could not bootstrap-register the running adapter version into the OTA store", "adapter", activeAdapterName, "error", err)
+			}
+		}
 		c["adapter_"+activeAdapterName] = &components.Adapter{
-			Store: storeFor(baseDir, "adapter_"+activeAdapterName), RunningVersion: adapterVersion,
+			Store: adapterStore, RunningVersion: adapterVersion,
 			Registry: registry, AdapterName: activeAdapterName, Matrix: matrix,
 			QRXCoreVersion: func() string { return *qrxCoreVersion },
 		}

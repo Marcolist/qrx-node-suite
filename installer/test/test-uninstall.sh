@@ -92,5 +92,75 @@ assert_eq "symlink escape: exit status" "2" "$status"
 rm -rf "$test_root"
 
 echo ""
+echo "== --purge-data --remove-qrx-core --yes together (R04) =="
+# Regression test for the R04 finding (external re-review of the F05 fix):
+# the F05 fix moved QRX_CORE_MARKER under QRX_CONFIG_DIR (deliberately --
+# root-only-writable, unlike the old QRX_DATA_DIR location), but main()
+# called purge_data (which `rm -rf`s the whole QRX_CONFIG_DIR) BEFORE
+# remove_qrx_core -- so passing both flags together silently deleted the
+# marker before remove_qrx_core ever got to read it, and QRX Core was
+# never actually removed despite being explicitly requested. This calls
+# remove_qrx_core then purge_data directly, in the order main() now uses
+# (not main() itself, which calls require_root() and remove_software(),
+# the latter touching real, hard-coded system paths like
+# /etc/systemd/system/qrx-agent.service -- neither belongs in a portable,
+# no-root-required unit test), against a fully isolated tempdir.
+test_root="$(mktemp -d)"
+QRX_CONFIG_DIR="${test_root}/etc/qrx-node-suite"
+QRX_DATA_DIR="${test_root}/var/lib/qrx-node-suite"
+# QRX_LOG_DIR, PURGE_DATA, REMOVE_QRX_CORE, and ASSUME_YES below are all
+# read only by functions defined in uninstall.sh (sourced above) --
+# invisible to shellcheck's per-file analysis across that `source`
+# boundary, same as the existing disables elsewhere in this file.
+# shellcheck disable=SC2034
+QRX_LOG_DIR="${test_root}/var/log/qrx-node-suite"
+QRX_CORE_INSTALL_ROOT="${test_root}/opt/qrx"
+QRX_CORE_MARKER="${QRX_CONFIG_DIR}/qrx-core-installed-by-this-installer"
+# shellcheck disable=SC2034
+PURGE_DATA=1
+# shellcheck disable=SC2034
+REMOVE_QRX_CORE=1
+# shellcheck disable=SC2034
+ASSUME_YES=1
+
+core_dir="${QRX_CORE_INSTALL_ROOT}/current"
+mkdir -p "$core_dir" "$QRX_CONFIG_DIR"
+echo "core binary" >"${core_dir}/qrx-cli"
+echo "$core_dir" >"$QRX_CORE_MARKER"
+
+remove_qrx_core_out="$(remove_qrx_core 2>&1)"
+purge_data >/dev/null 2>&1
+
+if [[ -d "$core_dir" ]]; then
+  echo "  FAIL - QRX Core directory still exists after remove_qrx_core+purge_data"
+  FAIL=$((FAIL + 1))
+else
+  echo "  ok - QRX Core directory was actually removed"
+  PASS=$((PASS + 1))
+fi
+if [[ -d "$QRX_CONFIG_DIR" || -d "$QRX_DATA_DIR" ]]; then
+  echo "  FAIL - config/data directories still exist after purge_data"
+  FAIL=$((FAIL + 1))
+else
+  echo "  ok - config/data directories were purged"
+  PASS=$((PASS + 1))
+fi
+if [[ "$remove_qrx_core_out" == *"no record shows this installer installed QRX Core"* ]]; then
+  echo "  FAIL - remove_qrx_core reported no marker (it must run before purge_data, not after)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  ok - remove_qrx_core found and used the marker before purge_data ran"
+  PASS=$((PASS + 1))
+fi
+
+rm -rf "$test_root"
+# shellcheck disable=SC2034
+PURGE_DATA=0
+# shellcheck disable=SC2034
+REMOVE_QRX_CORE=0
+# shellcheck disable=SC2034
+ASSUME_YES=0
+
+echo ""
 echo "${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

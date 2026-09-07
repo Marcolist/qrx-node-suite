@@ -29,4 +29,12 @@ var (
 	// release directory; see store.ErrAlreadyActive and the F08 fix for an
 	// external security audit's finding).
 	ErrAlreadyInstalled = errors.New("updates: this version is already installed and active")
+	// ErrAlreadyPrevious means the manifest's version for this component is
+	// already the recorded rollback target -- Install returns this early,
+	// before ever calling store.Store.Stage, for the same reason
+	// ErrAlreadyInstalled does: reaching Stage with this version would
+	// reuse the previous release's own directory (store.ErrAlreadyPrevious,
+	// the R03 fix for an external security re-review's finding). Rollback
+	// is the correct way to reactivate this version instead.
+	ErrAlreadyPrevious = errors.New("updates: this version is the current rollback target")
 )

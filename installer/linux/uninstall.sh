@@ -219,9 +219,20 @@ main() {
   echo "QRX Node Suite Uninstaller"
   echo ""
 
+  # remove_qrx_core MUST run before purge_data: the F05 fix moved
+  # QRX_CORE_MARKER under QRX_CONFIG_DIR (root-only-writable, deliberately
+  # -- see the comment where it's defined), but that also means
+  # purge_data's `rm -rf "$QRX_CONFIG_DIR"` deletes the marker right along
+  # with everything else in that directory. Running purge_data first (the
+  # order an earlier version of this script used) meant `--purge-data
+  # --remove-qrx-core --yes` together silently failed to remove QRX Core
+  # at all: remove_qrx_core would find no marker left to read and report
+  # "no record shows this installer installed QRX Core", even though the
+  # operator explicitly asked for both. Fix for the R04 finding (external
+  # re-review of the F05 fix).
   remove_software
-  purge_data
   remove_qrx_core
+  purge_data
 
   echo ""
   echo "QRX Core's blockchain data and wallet files, if any, were never touched by this script."

@@ -32,6 +32,48 @@ func (s *Store) CurrentDir() (string, error) {
 	return s.ReleaseDir(v), nil
 }
 
+// BootstrapCurrent records version as this component's "current" version,
+// WITHOUT staging or promoting anything and WITHOUT requiring
+// ReleaseDir(version) to exist on disk -- for registering an
+// already-running binary (installed by install.sh directly, never through
+// Stage/Promote) as this store's baseline version. A no-op if a current
+// version is already recorded: this must never overwrite real,
+// OTA-tracked state, only fill in a gap for a component nothing has ever
+// promoted through this store.
+//
+// Without this, a freshly bootstrapped install's Current() stays empty
+// until its first-ever OTA update succeeds -- and manifest.CheckNotDowngrade
+// and manifest.CheckNotReplayed both explicitly treat an empty current
+// version / empty last-seen-released-at as "nothing recorded yet, nothing
+// to compare against" and let anything through unconditionally. That means
+// the very first real Install call on a freshly bootstrapped system had
+// BOTH downgrade protection and replay protection silently disabled: an
+// attacker (or a compromised/buggy update source) offering an older,
+// already-patched-away-from version, or replaying a stale-but-validly-
+// signed manifest, would have it accepted with neither protection able to
+// object, simply because nothing had a version to compare it against yet.
+// Fix for the R05 finding (external security re-review): a bootstrap-
+// registration gap in the F07 fix.
+//
+// Deliberately does NOT create ReleaseDir(version) or anything a caller
+// might expect to read from that directory -- callers whose CurrentDir()
+// result is actually read from disk (the F07 dashboard-serving fix, for
+// one) must keep treating a "current version recorded, but its directory
+// has no real content" case as equivalent to "nothing usable is staged
+// here", the same as they already must for any other missing/corrupted
+// release directory.
+func (s *Store) BootstrapCurrent(version string) error {
+	if err := s.validate(); err != nil {
+		return err
+	}
+	if _, ok, err := s.Current(); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
+	return s.writePointerAtomic(pointerCurrent, version)
+}
+
 // Stage creates (or returns, if already present) the release directory for
 // version and marks it "staged" -- present on disk but not yet active. The
 // caller writes the verified artifact's contents into the returned
@@ -40,15 +82,24 @@ func (s *Store) CurrentDir() (string, error) {
 // staging/extraction).
 //
 // Refuses to stage a version equal to the one currently active
-// (ErrAlreadyActive): version's release directory IS the live "current"
-// directory in that case (ReleaseDir is purely a function of the version
-// string), so extracting into it writes over the live release's own files
-// in place, and a failed extraction's DiscardStaged(true) cleanup would
-// then delete the still-active release out from under the running
-// process -- confirmed by direct reproduction (a version offered again by
-// the update source, e.g. a re-check on the same channel, followed by a
-// transient extraction failure, e.g. a corrupted download). Regression fix
-// for an external security audit's F08 finding.
+// (ErrAlreadyActive) OR equal to the rollback target (ErrAlreadyPrevious):
+// version's release directory IS the live "current" or "previous"
+// directory in either case (ReleaseDir is purely a function of the version
+// string), so extracting into it writes over that release's own files in
+// place, and a failed extraction's DiscardStaged(true) cleanup would then
+// delete a release a pointer still references -- for "current", the
+// running process's own binary; for "previous", the one and only rollback
+// target RollbackToPrevious can revert to. Both confirmed by direct
+// reproduction (F08: a version offered again by the update source, e.g. a
+// re-check on the same channel; R03, an external re-review of the F08 fix:
+// staging the PREVIOUS version again -- allowed by CheckNotDowngrade with
+// AllowDowngrade, and by F08's fix, which only checked "current" -- then a
+// failed extraction destroyed the actual rollback target, after which
+// RollbackToPrevious still reported success and left "current" pointing at
+// a directory that no longer existed). A caller wanting to reactivate the
+// previous version should use RollbackToPrevious itself -- an atomic
+// pointer swap needing no download or re-extraction at all -- rather than
+// reinstalling it through Stage.
 func (s *Store) Stage(version string) (dir string, err error) {
 	if err := s.validate(); err != nil {
 		return "", err
@@ -57,6 +108,11 @@ func (s *Store) Stage(version string) (dir string, err error) {
 		return "", err
 	} else if ok && cur == version {
 		return "", fmt.Errorf("%w: %q is already the active version for component %q", ErrAlreadyActive, version, s.component)
+	}
+	if prev, ok, err := s.Previous(); err != nil {
+		return "", err
+	} else if ok && prev == version {
+		return "", fmt.Errorf("%w: %q is the rollback target for component %q -- use RollbackToPrevious instead of reinstalling it", ErrAlreadyPrevious, version, s.component)
 	}
 	dir = s.ReleaseDir(version)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

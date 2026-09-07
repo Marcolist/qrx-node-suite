@@ -229,6 +229,57 @@ echo "== setup_logging refuses to follow a symlink at LOG_FILE (F04) =="
   rm -rf "$test_root"
 }
 
+echo "== init_log_file survives a concurrent symlink-replant race (R02) =="
+{
+  # Regression test for the R02 finding (external re-review of the F04
+  # fix): the previous fix was "check -L, rm, then truncate" -- a
+  # check-then-act pattern with its own race window between the check and
+  # the truncate, where a still-running compromised agent process could
+  # replant the symlink in between. init_log_file replaced that with an
+  # atomic build-elsewhere-then-rename, which by construction has no such
+  # window: it never opens through the destination path at all. This
+  # proves it under an actual concurrent attacker, not just a
+  # symlink-already-present snapshot: a background loop continuously
+  # replaces the target path with a fresh symlink to the victim file while
+  # the foreground repeatedly calls init_log_file, as fast as each can
+  # go, for real wall-clock time -- not a fixed iteration count racing
+  # against unknown scheduling. The victim's content must survive every
+  # single one of those attempts.
+  test_root="$(mktemp -d)"
+  victim="${test_root}/victim"
+  target="${test_root}/install.log"
+  echo "do not touch me either" >"$victim"
+
+  attacker_stop="${test_root}/.stop"
+  attacker() {
+    while [[ ! -e "$attacker_stop" ]]; do
+      ln -sf "$victim" "$target" 2>/dev/null
+    done
+  }
+  attacker &
+  attacker_pid=$!
+
+  race_failures=0
+  race_iterations=0
+  end_time=$((SECONDS + 2))
+  while [[ $SECONDS -lt $end_time ]]; do
+    init_log_file "$target" || true
+    race_iterations=$((race_iterations + 1))
+    if [[ "$(cat "$victim" 2>/dev/null)" != "do not touch me either" ]]; then
+      race_failures=$((race_failures + 1))
+      break
+    fi
+  done
+
+  touch "$attacker_stop"
+  wait "$attacker_pid" 2>/dev/null
+
+  assert_eq "victim survived ${race_iterations} racing init_log_file calls" "0" "$race_failures"
+  assert_eq "victim content is untouched after the race" "do not touch me either" "$(cat "$victim")"
+
+  rm -rf "$test_root"
+}
+
 echo ""
 echo "${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

@@ -235,6 +235,72 @@ func TestStageRefusesAlreadyActiveVersion(t *testing.T) {
 	}
 }
 
+// TestStageRefusesPreviousVersionToo is a regression test for the R03
+// finding (external re-review of the F08 fix): F08's fix only refused
+// staging the CURRENT version, not the PREVIOUS (rollback-target) one.
+// Since AllowDowngrade permits re-offering an older version, and Stage's
+// release directory is purely a function of the version string, staging
+// the previous version again reused its own live directory as a staging
+// target -- and a failed extraction's DiscardStaged(true) cleanup then
+// deleted the one and only rollback target, after which
+// RollbackToPrevious still reported success and left "current" pointing
+// at a directory that no longer existed. Confirmed by direct
+// reproduction before this fix. This proves Stage now refuses that too,
+// and that the previous release's own files, and rollback itself, both
+// keep working.
+func TestStageRefusesPreviousVersionToo(t *testing.T) {
+	base := t.TempDir()
+	s := store.New(base, "agent")
+
+	dir1, err := s.Stage("1.0.0")
+	if err != nil {
+		t.Fatalf("Stage(1.0.0): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir1, "agentd"), []byte("v1.0.0 binary"), 0o755); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	if err := s.Promote(); err != nil {
+		t.Fatalf("Promote(1.0.0): %v", err)
+	}
+
+	dir2, err := s.Stage("2.0.0")
+	if err != nil {
+		t.Fatalf("Stage(2.0.0): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir2, "agentd"), []byte("v2.0.0 binary"), 0o755); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	if err := s.Promote(); err != nil {
+		t.Fatalf("Promote(2.0.0): %v", err)
+	}
+	// current=2.0.0, previous=1.0.0.
+
+	if _, err := s.Stage("1.0.0"); !errors.Is(err, store.ErrAlreadyPrevious) {
+		t.Fatalf("Stage(1.0.0) (the previous/rollback-target version) = %v, want ErrAlreadyPrevious", err)
+	}
+
+	// Nothing must have been staged, and the previous release's own file
+	// must be completely intact.
+	if _, ok, _ := s.Staged(); ok {
+		t.Error("expected nothing staged after Stage refused the previous version")
+	}
+	if _, err := os.Stat(filepath.Join(dir1, "agentd")); err != nil {
+		t.Fatalf("the previous release's own file is gone: %v", err)
+	}
+
+	// Rollback must still actually work afterward.
+	if err := s.RollbackToPrevious(); err != nil {
+		t.Fatalf("RollbackToPrevious: %v", err)
+	}
+	cur, ok, err := s.Current()
+	if err != nil || !ok || cur != "1.0.0" {
+		t.Fatalf("Current() after rollback = %q, %v, %v; want 1.0.0, true, nil", cur, ok, err)
+	}
+	if _, err := os.Stat(filepath.Join(s.ReleaseDir(cur), "agentd")); err != nil {
+		t.Fatalf("current (after rollback) points at a directory missing its own file: %v", err)
+	}
+}
+
 // TestComponentPathTraversalRejected is a regression test for the F03
 // finding (external security audit): a component name reaching Store
 // unvalidated let filepath.Join(baseDir, component) resolve outside
@@ -285,5 +351,68 @@ func TestComponentPathTraversalRejected(t *testing.T) {
 		if _, _, err := s.Current(); !errors.Is(err, store.ErrInvalidComponent) {
 			t.Errorf("component %q: Current() error = %v; want ErrInvalidComponent", bad, err)
 		}
+	}
+}
+
+// TestBootstrapCurrentRegistersVersionOnFreshStore is a regression test
+// for the R05 finding (external security re-review of the F07 fix): a
+// freshly bootstrapped install (its binary copied into place by
+// install.sh, never staged/promoted through this store at all) had
+// Current() stay empty forever, until its first-ever OTA update
+// succeeded. BootstrapCurrent is what cmd/agentd now calls at startup to
+// close that gap. This proves it sets Current() on an empty store, and
+// crucially, that it never overwrites a version this store has already
+// recorded through a real Stage/Promote cycle.
+func TestBootstrapCurrentRegistersVersionOnFreshStore(t *testing.T) {
+	base := t.TempDir()
+	s := store.New(base, "agent")
+
+	if _, ok, _ := s.Current(); ok {
+		t.Fatal("expected a fresh store to have no current version yet")
+	}
+	if err := s.BootstrapCurrent("0.1.0"); err != nil {
+		t.Fatalf("BootstrapCurrent: %v", err)
+	}
+	cur, ok, err := s.Current()
+	if err != nil || !ok || cur != "0.1.0" {
+		t.Fatalf("Current() after BootstrapCurrent = %q, %v, %v; want 0.1.0, true, nil", cur, ok, err)
+	}
+
+	// Calling it again with a DIFFERENT version must be a no-op: it must
+	// never overwrite whatever is already recorded, bootstrap or real.
+	if err := s.BootstrapCurrent("9.9.9"); err != nil {
+		t.Fatalf("BootstrapCurrent (second call): %v", err)
+	}
+	if cur, _, _ := s.Current(); cur != "0.1.0" {
+		t.Errorf("Current() after a second BootstrapCurrent call = %q, want unchanged 0.1.0", cur)
+	}
+}
+
+// TestBootstrapCurrentNeverOverwritesRealPromotedVersion proves
+// BootstrapCurrent is safe to call unconditionally at every startup: once
+// a real OTA update has ever promoted a version through this store,
+// BootstrapCurrent must never touch it, no matter what RunningVersion the
+// currently-executing binary happens to report (e.g. a stale ldflags
+// value, or a self-update that promoted but hasn't restarted into yet).
+func TestBootstrapCurrentNeverOverwritesRealPromotedVersion(t *testing.T) {
+	base := t.TempDir()
+	s := store.New(base, "agent")
+
+	dir, err := s.Stage("2.0.0")
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agentd"), []byte("v2.0.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Promote(); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+
+	if err := s.BootstrapCurrent("0.1.0-dev"); err != nil {
+		t.Fatalf("BootstrapCurrent: %v", err)
+	}
+	if cur, _, _ := s.Current(); cur != "2.0.0" {
+		t.Errorf("Current() after BootstrapCurrent on an already-promoted store = %q, want unchanged 2.0.0", cur)
 	}
 }
