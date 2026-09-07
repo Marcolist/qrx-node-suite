@@ -69,6 +69,9 @@ func run() error {
 	configPath := flag.String("config", os.Getenv("QRX_AGENT_CONFIG"), "path to a JSON config file (optional -- Mock mode works with none)")
 	flag.Parse()
 
+	if err := requireConfigPathExists(*configPath); err != nil {
+		return err
+	}
 	cfg := config.Default()
 	if *configPath != "" {
 		if err := config.LoadInto(*configPath, &cfg); err != nil {
@@ -317,6 +320,29 @@ func run() error {
 		return fmt.Errorf("http server: %w", err)
 	}
 	logger.Info("shutdown complete")
+	return nil
+}
+
+// requireConfigPathExists rejects an explicitly-given -config/
+// QRX_AGENT_CONFIG path that doesn't exist, before config.LoadInto ever
+// gets a chance to run. LoadInto's own contract ("no file at path ->
+// Default()'s values stand") is correct for the zero-config case -- no
+// path requested at all, which is how Mock-mode development is meant to
+// work -- but wrong for a caller that explicitly named a specific file:
+// path == "" (nothing requested) is not the same claim as "-config
+// /etc/qrx-node-suite/agent.json" (a specific file requested) failing to
+// exist, and treating a typo'd or missing path the same as "no config
+// wanted" meant a broken install could silently boot in Mock mode --
+// serving assumed/fake node data -- with no error anywhere. Returns nil
+// for an empty path (nothing to check) or a path that exists; a
+// descriptive error otherwise. (F13 fix, external security audit)
+func requireConfigPathExists(path string) error {
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("-config %s does not exist or is not readable -- refusing to silently start in Mock mode with defaults instead: %w", path, err)
+	}
 	return nil
 }
 

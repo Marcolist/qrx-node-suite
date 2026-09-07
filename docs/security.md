@@ -67,12 +67,25 @@ Expanding on [`SECURITY.md`](../SECURITY.md)'s summary:
    `agent/api`'s auth middleware (docs/development.md) and
    `agent/storage.AuditLogStore`; every `ADMIN_*` action constant is defined
    in `agent/storage/audit_log.go`.
+7. **An explicitly-requested config that fails to load is a startup
+   failure, never a silent fallback to Mock-mode defaults.**
+   `cmd/agentd/main.go`'s `requireConfigPathExists` rejects a `-config`/
+   `QRX_AGENT_CONFIG` path that doesn't exist or isn't readable before
+   `config.LoadInto` (whose own contract, correctly, is "no path requested
+   at all -> Default()'s values stand" for zero-config Mock-mode
+   development) ever runs -- a real, intended config being unreachable is
+   not the same situation as none being requested, and conflating them
+   meant a broken install (a typo'd path, a permissions problem) could
+   silently boot serving assumed/fake node data with no error anywhere.
+   As of the fix for an external audit's F13 finding.
 
 ## External audit: confirmed findings not yet fixed
 
 An external security audit of this codebase (16 findings, F01-F16) has been
-worked through in priority order: F01-F05, F07, F08, and F11 are fixed above,
-each with a regression test that fails against the pre-fix code. The
+worked through in priority order: F01-F05, F07, F08, and F11 are fixed
+above, each with a regression test that fails against the pre-fix code;
+F13 is partially fixed (see [Hard guarantees](#hard-guarantees-detail)
+item 7 for what's fixed, and below for what's still deferred). The
 remaining findings were independently verified against the current source
 (never taken on faith from the report) and are confirmed real, but are
 deferred rather than fixed in the same pass -- each for a reason noted below,
@@ -117,13 +130,22 @@ appended to an already-large change.
   closing instructions name as the next priority tier, and is substantial
   enough (a least-privilege helper design, a real health probe, wiring
   `dir` through) to warrant its own pass.
-- **F13 -- Mock-mode fallback is silent.** Confirmed: an explicitly-named
-  but nonexistent `-config` path falls back to Mock-mode defaults with no
-  error; `GET /api/v1/version` reports an assumed `qrx_core_version` even
-  with no real node connected; `/health` is pure liveness, not readiness.
-  Deferred: fixing the silent-fallback case cleanly means deciding whether
-  a bad `-config` path should be a hard startup failure (a behavior
-  change worth flagging to operators, not a drive-by patch).
+- **F13 -- Mock-mode fallback is silent (partially fixed).** Confirmed
+  three distinct issues under this finding. **Fixed:** an explicitly-named
+  but nonexistent `-config` path used to fall back to Mock-mode defaults
+  with no error at all -- see [Hard guarantees](#hard-guarantees-detail)
+  item 7. **Still deferred:** `GET /api/v1/version` reports an assumed
+  `qrx_core_version` (`AdapterConfig.AssumedQRXCoreVersion`) even with no
+  real node connected -- already logged as a warning at the point it's
+  used (`agent/config/config.go`'s own doc comment), so this is
+  a narrower, already-flagged case than the silent-startup gap, and
+  changing what `/api/v1/version` reports is a dashboard-facing behavior
+  change of its own; `/health` is pure liveness (does this process
+  respond at all), not readiness (is it actually connected to a working
+  QRX Core node) -- deferred because that's a genuine design decision
+  (a second `/ready` endpoint? redefine `/health`'s semantics, breaking
+  anything that already polls it as pure liveness?) this document
+  shouldn't make unilaterally.
 - **F14 -- re-running `install.sh` doesn't match its own documentation.**
   Confirmed: `docs/installer.md#upgrades` says re-running `install.sh`
   "does not re-install or touch your existing configuration/database", but
