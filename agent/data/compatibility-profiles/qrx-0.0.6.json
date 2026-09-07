@@ -1,0 +1,35 @@
+{
+  "profile_version": 1,
+  "qrx_core_version": "0.0.6",
+  "known_cli_commands": [
+    "getnodestatus",
+    "getblockchaininfo",
+    "getnetworkinfo",
+    "getuptime",
+    "getbuildinfo",
+    "getmempoolinfo",
+    "getrecentblocks",
+    "getrecenttransactions"
+  ],
+  "known_rpc_methods": [],
+  "feature_flags": {
+    "velocity": false,
+    "validator_status": false,
+    "block_producer_info": false,
+    "nonce_lanes": false
+  },
+  "required_adapter": "legacy006",
+  "optional_features": [],
+  "known_bugs": [
+    "No VELOCITY engine. getvelocityinfo/getnoncelanes/createvelocitytransaction do not exist on this branch."
+  ],
+  "platform_notes": "UNVERIFIED: predates VELOCITY (introduced in 0.0.7). Retained for PARTIAL-status legacy compatibility only; treat as unsupported for validator use.",
+  "min_recommended_suite_version": "0.1.0",
+  "core_version_switch_safety": {
+    "blockchain_data": "",
+    "configuration": "",
+    "wallet": "",
+    "adapter": "",
+    "network": ""
+  }
+}
