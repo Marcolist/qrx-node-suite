@@ -220,6 +220,13 @@ nothing. This is the fix for an external audit's F05 finding; see
 `installer/test/test-uninstall.sh`'s `resolve_qrx_core_target` tests for the
 regression coverage.
 
+`--purge-data --remove-qrx-core` together run QRX Core removal **before**
+purging data, specifically because the marker now lives inside `QRX_CONFIG_DIR`:
+purging that directory first would delete the marker before it's ever read,
+silently skipping Core removal even though it was explicitly requested (the R04
+finding, an external re-review of the F05 fix -- see
+`installer/test/test-uninstall.sh`'s combined-flags regression test).
+
 ## Environment variables
 
 The default command needs none of these -- they're for advanced/scripted use.
