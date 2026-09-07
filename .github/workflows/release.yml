@@ -125,6 +125,18 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # Job-level, not step-level: a step's `if:` can read env.* set at the
+    # job (or workflow) level, but NOT env.* set in that same step's own
+    # `env:` block (an earlier version of this workflow had that bug: `if:
+    # env.X != ''` on a step whose own `env:` defined X was always false).
+    # secrets.* itself must never appear directly in an `if:` expression --
+    # GitHub's own docs (docs.github.com/en/actions/how-tos/write-workflows/
+    # choose-what-workflows-do/use-secrets) say to set the secret as a
+    # job-level environment variable first and condition on that instead;
+    # an external re-review (R01) caught that this workflow got that part
+    # wrong. This is that fix.
+    env:
+      RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -143,28 +155,34 @@ jobs:
         working-directory: dist
         run: sha256sum *.tar.gz > SHA256SUMS
 
-      # `if:` conditions here reference secrets.* directly, NOT
-      # env.RELEASE_SIGNING_PRIVATE_KEY -- a step's own `env:` block is
-      # not visible to that same step's `if:` evaluation in GitHub
-      # Actions, so `if: env.X != ''` is always false regardless of
-      # whether the secret is set (a real bug an earlier version of this
-      # workflow had: "Sign checksums" never ran, "Warn if unsigned"
-      # always did, so every release was silently unsigned no matter
-      # what). secrets.* IS a valid `if:` context.
+      # `if:` conditions here read env.RELEASE_SIGNING_PRIVATE_KEY (set at
+      # job level above), never secrets.RELEASE_SIGNING_PRIVATE_KEY
+      # directly -- GitHub's docs say a secret must be assigned to a
+      # job/workflow-level env var before it can be used in a step's `if:`
+      # (docs.github.com/en/actions/how-tos/write-workflows/choose-what-
+      # workflows-do/use-secrets). An earlier version of this workflow had
+      # the OPPOSITE bug (a step's own `env:` block isn't visible to that
+      # same step's `if:`, so "Sign checksums" never ran and "Fail if
+      # unsigned" always did); moving the assignment to job level fixes
+      # both problems at once.
       - name: Sign checksums
-        if: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY != '' }}
-        env:
-          RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY }}
+        if: ${{ env.RELEASE_SIGNING_PRIVATE_KEY != '' }}
         run: |
-          echo "$RELEASE_SIGNING_PRIVATE_KEY" > /tmp/release-signing.priv
+          # A private key temp file should never sit at a fixed, guessable
+          # /tmp path any other process on the runner could read before
+          # cleanup, and cleanup must run even if signing itself fails --
+          # mktemp (private to this process, 0600 by default) plus a trap
+          # covers both.
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          echo "$RELEASE_SIGNING_PRIVATE_KEY" > "$key_file"
           # sign-checksums has no go.mod at the repo root (only under
           # agent/) -- must run from there, with absolute paths for the
           # dist/ files it reads/writes since $PWD changes.
           (cd agent && go run ./cmd/sign-checksums \
-            -key /tmp/release-signing.priv \
+            -key "$key_file" \
             -in "${GITHUB_WORKSPACE}/dist/SHA256SUMS" \
             -out "${GITHUB_WORKSPACE}/dist/SHA256SUMS.sig")
-          rm -f /tmp/release-signing.priv
 
       # install.sh (docs/installer.md#release-security) hard-requires a
       # valid signature for any GitHub-sourced release -- it will not
@@ -172,7 +190,7 @@ jobs:
       # configured, so an unsigned release here is not a soft warning,
       # it's a broken release. Fail the job rather than publish one.
       - name: Fail if unsigned
-        if: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY == '' }}
+        if: ${{ env.RELEASE_SIGNING_PRIVATE_KEY == '' }}
         run: |
           echo "::error::RELEASE_SIGNING_PRIVATE_KEY repo secret is not set. install.sh refuses to install an unsigned release (docs/installer.md#release-security) -- publishing one now would produce a release nobody can actually install via the documented one-line command. Set the secret before tagging a release; see docs/deployment.md#signing-keys."
           exit 1
