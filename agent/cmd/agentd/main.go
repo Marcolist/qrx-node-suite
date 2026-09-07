@@ -41,10 +41,17 @@ import (
 
 // These identify THIS build. suiteVersion/agentVersion are independent
 // version domains (docs/updates.md#component-version-model) -- bump them
-// as part of a release, never derive one from the other.
+// as part of a release, never derive one from the other. They are `var`,
+// not `const`, so the release pipeline can inject the real tagged version
+// with `-ldflags "-X main.suiteVersion=... -X main.agentVersion=..."`
+// (.github/workflows/release.yml) -- a local `go build` with no ldflags
+// keeps these development-default values.
+var (
+	suiteVersion = "0.1.0-dev"
+	agentVersion = "0.1.0-dev"
+)
+
 const (
-	suiteVersion             = "0.1.0"
-	agentVersion             = "0.1.0"
 	dashboardVersionFallback = "unbuilt" // overridden once GET /api/v1/version can read the served dashboard's own version marker
 	apiVersion               = "v1"
 	telemetryProtocolVersion = 1

@@ -1,6 +1,19 @@
 # Deployment
 
-## Linux (including Raspberry Pi 4/5, arm64)
+## Linux: the one-line installer (recommended)
+
+```sh
+curl -sSL https://raw.githubusercontent.com/Marcolist/qrx-node-suite/main/install.sh | sudo bash
+```
+
+Installs a prebuilt, signed release as a systemd service -- no Go/Node.js/compiler
+needed on the target machine. This is the supported path for actually *running* QRX
+Node Suite; see [`docs/installer.md`](installer.md) for the full behavior, security
+model, and every environment variable. The rest of this document covers building
+from source instead -- for development, an unsupported architecture, or a platform
+the installer doesn't cover yet (macOS/Windows).
+
+## Linux (including Raspberry Pi 4/5, arm64): building from source
 
 ```sh
 cd agent
@@ -39,22 +52,37 @@ from a real symlink to a plain text file when the process lacks
 enabled) -- see `agent/updates/store/atomic_windows.go`. Both forms are
 read transparently either way.
 
-## Building a release (with the dashboard embedded)
+## Building a release
 
-This repository's `cmd/agentd` currently serves the dashboard from disk
-(`dashboard_dir` config, default `./dashboard/dist`) rather than
-`go:embed`-ing it, because the dashboard needs `npm run build` before
-anything exists to embed, and this repository's own build environment had
-no npm registry access to verify that step. A release build process should:
+`.github/workflows/release.yml` is the actual release pipeline, triggered by
+pushing a tag like `v0.1.0`: it builds `agentd` natively for linux/amd64 and
+linux/arm64 (see that workflow's comments on why *natively*, on the oldest
+supported glibc, rather than cross-compiling -- `agent/storage/sqlite` is cgo),
+builds the dashboard (`npm ci && npm run build`), and packages each
+architecture as `qrx-node-suite_<version>_linux_<arch>.tar.gz` (`agentd` +
+`dashboard/` + `uninstall.sh` + `LICENSE` + `VERSION`, no wrapping directory --
+this is what `install.sh` downloads). It generates `SHA256SUMS`, signs it with
+`agent/cmd/sign-checksums` if the `RELEASE_SIGNING_PRIVATE_KEY` repo secret is
+set (see [Signing keys](#signing-keys) below), and publishes everything as a
+GitHub Release.
 
-1. `cd dashboard && npm ci && npm run build`
-2. Replace `cmd/agentd/dashboard.go`'s disk-serving handler with a
-   `//go:embed dist` of the dashboard's build output (or keep disk-serving
-   for a "thin" release that still needs `dashboard/dist/` shipped
-   alongside the binary -- both are valid; embedding gets you the "one
-   binary, one config, one SQLite DB" deployment story described in
-   `docs/architecture.md`).
-3. `cd agent && go build -o agentd ./cmd/agentd`
+`cmd/agentd` still serves the dashboard from disk (`dashboard_dir` config,
+default `./dashboard/dist`) rather than `go:embed`-ing it -- the release
+tarball ships `dashboard/` alongside the binary rather than baking it in.
+Switching to `//go:embed dist` later (for a single self-contained binary) is a
+compatible follow-up, not required for the current release process to work.
+
+To build a release tarball by hand (matching what CI does):
+
+```sh
+cd agent && go build -ldflags "-X main.suiteVersion=0.1.0 -X main.agentVersion=0.1.0" -o ../agentd ./cmd/agentd
+cd dashboard && npm ci && npm run build && cd ..
+mkdir -p pkg/dashboard
+cp agentd pkg/agentd && cp -a dashboard/dist/. pkg/dashboard/
+cp LICENSE installer/linux/uninstall.sh installer/qrx-core-sources.sh pkg/
+echo 0.1.0 > pkg/VERSION
+tar -czf qrx-node-suite_0.1.0_linux_amd64.tar.gz -C pkg .
+```
 
 ## SQLite runtime dependency
 
@@ -65,8 +93,24 @@ Windows needs the DLL shipped alongside the binary). See
 
 ## Signing keys
 
-Generate a release signing key once (`agent/cmd/gen-signing-key`), keep the
-private key off every deployed Agent entirely, and put the public key's
-base64 into every Agent's `updates.public_key_base64` config. See
-`docs/development.md#signing-a-manifest-for-local-testing` and
-`docs/security.md`.
+There are two independent Ed25519 keys/trust boundaries in this project --
+generate each once with `agent/cmd/gen-signing-key`, and never let a private
+key touch anything except the machine/secret store that signs with it:
+
+1. **OTA update manifest signing** (`agent/updates/manifest`,
+   `docs/updates.md#update-manifest`): the public key goes into every deployed
+   Agent's `updates.public_key_base64` config; the private key signs update
+   manifests via `agent/cmd/sign-manifest`. See
+   `docs/development.md#signing-a-manifest-for-local-testing` and
+   `docs/security.md`.
+2. **Release/bootstrap-installer signing** (`docs/installer.md#release-security`):
+   the public key is compiled directly into `install.sh`
+   (`QRX_TRUSTED_PUBLIC_KEY_B64`) as its trust anchor; the private key signs
+   each release's `SHA256SUMS` via `agent/cmd/sign-checksums`, run by
+   `.github/workflows/release.yml` using the `RELEASE_SIGNING_PRIVATE_KEY`
+   repository secret. Rotating this key means updating both the secret and
+   `install.sh`'s embedded public key together -- old installer copies would
+   otherwise reject new releases signed with a rotated key.
+
+These may be the same keypair or different ones; keeping them separate means a
+compromise of one signing flow doesn't automatically compromise the other.

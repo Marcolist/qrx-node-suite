@@ -1,0 +1,170 @@
+name: Release
+
+# Builds and publishes the prebuilt artifacts install.sh downloads
+# (docs/installer.md). Triggered by pushing a tag like v0.1.0 -- the tag
+# name (minus the leading "v") becomes the release version, injected into
+# the agentd binary via -ldflags (agent/cmd/agentd/main.go's suiteVersion/
+# agentVersion are `var`, not `const`, specifically so this works).
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  dashboard:
+    name: Build dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: dashboard/package.json
+
+      # No package-lock.json is committed yet (see dashboard/README.md and
+      # .github/workflows/ci.yml) -- switch to `npm ci` once one exists.
+      - name: Install dependencies
+        working-directory: dashboard
+        run: npm install
+
+      - name: Build
+        working-directory: dashboard
+        run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-dist
+          path: dashboard/dist
+
+  build:
+    name: Build agentd (${{ matrix.goarch }})
+    needs: dashboard
+    strategy:
+      matrix:
+        include:
+          # cgo (agent/storage/sqlite, ADR-001) means these binaries are
+          # dynamically linked against the build host's glibc -- so build
+          # on the OLDEST glibc among the supported targets
+          # (docs/installer.md's platform list: Ubuntu 22.04/24.04, Debian
+          # 12, Raspberry Pi OS) so the result runs on all of them, not
+          # just the newest. Ubuntu 22.04 = glibc 2.35, which predates
+          # Debian 12's 2.36 and Ubuntu 24.04's 2.39. GitHub's ARM64
+          # hosted runners are ubuntu-22.04-arm / ubuntu-24.04-arm; if
+          # ubuntu-22.04-arm isn't available on this repo's plan, the
+          # Docker smoke tests (installer/test/) against ubuntu:22.04,
+          # ubuntu:24.04, and debian:12 are what will catch it.
+          - goarch: amd64
+            runs-on: ubuntu-22.04
+          - goarch: arm64
+            runs-on: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false # no go.sum exists at all (ADR-001)
+
+      - name: Install libsqlite3-dev
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+
+      - name: Compute version
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          echo "version=${tag#v}" >>"$GITHUB_OUTPUT"
+
+      - name: Build agentd
+        working-directory: agent
+        run: |
+          go build -trimpath \
+            -ldflags "-s -w -X main.suiteVersion=${{ steps.version.outputs.version }} -X main.agentVersion=${{ steps.version.outputs.version }}" \
+            -o ../agentd ./cmd/agentd
+
+      - name: Verify binary architecture
+        run: |
+          file ./agentd
+          [[ "${{ matrix.goarch }}" == "amd64" ]] && expect="x86-64" || expect="ARM aarch64"
+          file ./agentd | grep -q "$expect" || { echo "built binary does not match expected arch $expect"; exit 1; }
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dashboard-dist
+          path: dashboard-dist
+
+      - name: Package release tarball
+        run: |
+          pkg="qrx-node-suite_${{ steps.version.outputs.version }}_linux_${{ matrix.goarch }}"
+          mkdir -p "$pkg/dashboard"
+          cp agentd "$pkg/agentd"
+          chmod 0755 "$pkg/agentd"
+          cp -a dashboard-dist/. "$pkg/dashboard/"
+          cp LICENSE "$pkg/LICENSE"
+          cp installer/linux/uninstall.sh "$pkg/uninstall.sh"
+          chmod 0755 "$pkg/uninstall.sh"
+          cp installer/qrx-core-sources.sh "$pkg/qrx-core-sources.sh"
+          chmod 0755 "$pkg/qrx-core-sources.sh"
+          echo "${{ steps.version.outputs.version }}" > "$pkg/VERSION"
+          # -C "$pkg" . (not `tar -czf x.tar.gz "$pkg"`) so the tarball has
+          # no wrapping directory -- install.sh's install_release() expects
+          # agentd, dashboard/, etc. directly at the archive root.
+          tar -czf "${pkg}.tar.gz" -C "$pkg" .
+          echo "ASSET_NAME=${pkg}.tar.gz" >>"$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.goarch }}
+          path: ${{ env.ASSET_NAME }}
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > SHA256SUMS
+
+      - name: Sign checksums
+        if: ${{ env.RELEASE_SIGNING_PRIVATE_KEY != '' }}
+        env:
+          RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY }}
+        run: |
+          echo "$RELEASE_SIGNING_PRIVATE_KEY" > /tmp/release-signing.priv
+          go run ./agent/cmd/sign-checksums -key /tmp/release-signing.priv -in dist/SHA256SUMS -out dist/SHA256SUMS.sig
+          rm -f /tmp/release-signing.priv
+
+      - name: Warn if unsigned
+        if: ${{ env.RELEASE_SIGNING_PRIVATE_KEY == '' }}
+        env:
+          RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY }}
+        run: |
+          echo "::warning::RELEASE_SIGNING_PRIVATE_KEY repo secret is not set -- publishing SHA256SUMS unsigned. install.sh will fall back to checksum-only verification for this release. See docs/installer.md#release-security."
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/SHA256SUMS.sig
+          fail_on_unmatched_files: false
+          generate_release_notes: true

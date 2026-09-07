@@ -36,3 +36,22 @@ component (Agent, Dashboard, each Adapter) rather than one suite-wide version nu
 - Linux (systemd unit + install script + scoped sudoers rule); macOS (launchd plist) and
   Windows (Service Control Manager) installer scaffolding.
 - CI (`.github/workflows/ci.yml`): Go build/vet/gofmt/test, dashboard typecheck/build.
+- Boot-attempt counter with automatic rollback (`agent/updates/bootguard.go`): closes the
+  self-update crash-loop gap by forcing a rollback to the previous version after too many
+  consecutive failed boots of a self-binary (agent/adapter) update, before
+  `Manager.ResumeSelfUpdate` ever gets a chance to run.
+- One-line installer (`install.sh`, `docs/installer.md`): `curl -sSL .../install.sh | sudo
+  bash` installs QRX Node Suite as a systemd service on Ubuntu 22.04/24.04, Debian 12, and
+  Raspberry Pi OS (amd64/arm64) from a prebuilt, checksummed, Ed25519-signed release --
+  no Go/Node.js/compiler needed on the target. Includes OS/arch detection, safe dependency
+  installation, a dedicated `qrx-agent` service user, a generated random admin token, QRX
+  Core auto-detection (never inventing a download source), health-checked startup, and an
+  uninstaller (`qrx-node-suite uninstall`) that never touches QRX Core data without
+  explicit confirmation.
+- `.github/workflows/release.yml`: builds and publishes signed, checksummed release
+  tarballs (linux/amd64, linux/arm64) on tag push; `agent/cmd/sign-checksums` signs
+  `SHA256SUMS` for `install.sh` to verify.
+- `.github/workflows/installer-ci.yml`: shellcheck, pure-function unit tests
+  (`installer/test/`), and a Docker-based end-to-end smoke test (Ubuntu 22.04/24.04,
+  Debian 12) that installs a freshly built local release inside a real systemd container
+  and verifies the Agent actually becomes healthy.
