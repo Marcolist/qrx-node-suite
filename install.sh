@@ -121,6 +121,36 @@ require_root() {
   fi
 }
 
+# init_log_file (re)creates the regular file at path as an empty, real
+# file -- atomically, so it is immune to a symlink (or anything else)
+# already at that path, and immune to a race where such a symlink appears
+# in between a check and this call. It never opens/truncates through the
+# existing path at all: it creates a fresh file under a private temp name
+# in the SAME directory (so the rename below stays on one filesystem, and
+# is therefore atomic), then renames it over path. rename(2) replaces
+# whatever is at the destination -- symlink, regular file, or nothing --
+# without ever dereferencing it, which is exactly what makes this safe
+# where a plain `: >path` (or a "check -L, rm, then truncate" two-step,
+# which still has a race window between the two steps) is not. Verified
+# with a symlink-at-destination test before relying on this. Same
+# technique agent/updates/store/atomic.go already uses for pointer files.
+# Fix for the F04 finding's remaining TOCTOU gap (R02, external security
+# re-review): QRX_LOG_DIR is root-owned as of this installer version, but
+# a system first installed by an older installer may still have it
+# owned by the unprivileged qrx-agent service user at the moment this
+# runs (install_release, later in main(), is what re-secures it) -- and
+# even once root-owned, /tmp itself (this function's fallback location)
+# is world-writable with a predictable filename, an unrelated but
+# equally real symlink-attack surface this same fix closes.
+init_log_file() {
+  local path="$1" dir tmp
+  dir="$(dirname "$path")"
+  [[ -d "$dir" ]] || return 1
+  tmp="${path}.tmp-$$-${RANDOM}${RANDOM}"
+  (umask 022 && : >"$tmp") 2>/dev/null || return 1
+  mv -f "$tmp" "$path" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+}
+
 setup_logging() {
   # Once QRX_LOG_DIR can plausibly be created, move logging there; until
   # then (or if creation fails, e.g. read-only /var in a container) keep
@@ -128,21 +158,7 @@ setup_logging() {
   if mkdir -p "$QRX_LOG_DIR" 2>/dev/null; then
     LOG_FILE="${QRX_LOG_DIR}/install.log"
   fi
-  # QRX_LOG_DIR is root-owned as of this installer version (install_release
-  # below), but a system that was first installed by an older installer may
-  # still have it owned by the unprivileged service user from that earlier
-  # run -- and this function runs before install_release() re-secures it.
-  # Never blindly truncate through whatever already exists at LOG_FILE: a
-  # compromised qrx-agent process could otherwise pre-plant a symlink there
-  # pointing at any root-owned file, turning this root-run truncate into an
-  # arbitrary-file-truncation primitive on every re-run of this installer
-  # (a documented, expected flow -- see docs/installer.md#upgrades). If
-  # anything other than a plain regular file is there, remove it first so
-  # the following redirection always creates a fresh, real file.
-  if [[ -L "$LOG_FILE" ]] || { [[ -e "$LOG_FILE" ]] && [[ ! -f "$LOG_FILE" ]]; }; then
-    rm -f "$LOG_FILE" 2>/dev/null || true
-  fi
-  : >"$LOG_FILE" 2>/dev/null || true
+  init_log_file "$LOG_FILE" || true
   log "QRX Node Suite installer v${INSTALLER_VERSION} starting"
 }
 

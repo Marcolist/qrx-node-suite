@@ -151,11 +151,23 @@ re-running `install.sh` is an expected, documented flow (see
 [Upgrades](#upgrades) below) and its logging setup runs as root before it
 re-secures the directory's ownership, that symlink would later be followed and
 truncated by root -- an unprivileged-to-root arbitrary-file-truncation primitive.
-`install.sh`'s `setup_logging()` additionally refuses to write through anything at
-`install.log`'s path that isn't a plain regular file (removing it first), so even
-a system that was *first* installed by an older, vulnerable `install.sh` -- and so
-still has an agent-owned log directory left over from that earlier run -- is safe
-the moment it's re-run with a patched `install.sh`.
+`install.sh`'s `setup_logging()` additionally creates `install.log` via
+`init_log_file()`, which never opens or truncates through the existing path at
+all: it writes a fresh file under a private temp name in the same directory,
+then atomically renames it over `install.log`'s path. `rename(2)` replaces
+whatever is at the destination -- symlink, regular file, or nothing -- without
+ever dereferencing it, so this is safe against a symlink already there **and**
+against one planted in a race by a still-running compromised process at any
+point up to the rename (an earlier "check for a symlink, remove it, then
+truncate" version of this fix closed the first case but still had a race
+window between the check and the truncate for the second -- see
+`installer/test/test-detection.sh`'s concurrent-attacker regression test,
+which reproducibly broke that earlier version within single-digit iterations
+and now runs clean). This means even a system that was *first* installed by an
+older, vulnerable `install.sh` -- and so still has an agent-owned log directory
+left over from that earlier run, with `qrx-agent` still actively running and
+able to race this exact window -- is safe the moment it's re-run with a
+patched `install.sh`.
 
 ## Upgrades
 
