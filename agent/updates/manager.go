@@ -311,6 +311,15 @@ func (m *Manager) Install(ctx context.Context, component string, opts InstallOpt
 	if err != nil {
 		return nil, err
 	}
+	if curVersion != "" && curVersion == comp.Version {
+		// Short-circuit before ever reaching st.Stage: staging the
+		// already-active version would reuse the live release directory in
+		// place (store.ErrAlreadyActive), and a failed extraction there
+		// could destroy it -- see the F08 fix. "Already installed" is a
+		// clean, expected outcome, not a failure, so this returns early
+		// rather than letting it surface as a generic store error.
+		return nil, fmt.Errorf("%w: %s", ErrAlreadyInstalled, comp.Version)
+	}
 	if err := manifest.CheckNotDowngrade(curVersion, comp.Version, opts.AllowDowngrade); err != nil {
 		return nil, err
 	}

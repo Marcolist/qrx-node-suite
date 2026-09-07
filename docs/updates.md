@@ -97,6 +97,15 @@ becomes `current`, `staged` pointer cleared) -> `RollbackToPrevious` (swaps
 `retain=2`). Every pointer write is a temp-file-then-`os.Rename`, atomic on
 every target platform -- see `agent/updates/store/atomic.go`.
 
+`Stage(version)` refuses outright (`store.ErrAlreadyActive`) if `version` is
+already the component's `current` one, and `Manager.Install` checks for this
+even earlier (`ErrAlreadyInstalled`, before ever calling `Stage`): a
+release's directory is purely a function of its version string
+(`releases/<version>`), so staging the already-active version would reuse
+the live `current` directory in place, and a failed extraction there would
+then have its cleanup delete the still-active release out from under the
+running process. Fix for an external security audit's F08 finding.
+
 ## Safe update process
 
 `agent/updates.Manager.Install` runs, per component:

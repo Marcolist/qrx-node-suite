@@ -31,6 +31,12 @@ import (
 // of a file named "current"/"previous" from an attacker-chosen directory.
 var ErrInvalidComponent = errors.New("store: invalid component name")
 
+// ErrAlreadyActive means Stage was asked to stage the version that is
+// already the component's current one -- see Stage's doc comment for why
+// this is refused outright rather than silently reusing the live release
+// directory.
+var ErrAlreadyActive = errors.New("store: version is already the active version")
+
 // Store manages one component's on-disk releases and current/previous/staged
 // pointers under baseDir/component.
 type Store struct {

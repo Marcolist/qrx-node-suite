@@ -18,6 +18,7 @@ import (
 	"qrx-node-suite/agent/updates/components"
 	"qrx-node-suite/agent/updates/manifest"
 	"qrx-node-suite/agent/updates/sources"
+	"qrx-node-suite/agent/updates/store"
 )
 
 // fakeController is a synchronous (non-self-binary) Controller test double.
@@ -387,6 +388,40 @@ func TestCheckReportsCheckErrorInsteadOfFailingOutright(t *testing.T) {
 	}
 	if result.Current != "1.0.0" {
 		t.Errorf("Current = %q, want 1.0.0 (must survive a failed manifest fetch)", result.Current)
+	}
+}
+
+// TestInstallSameVersionAgainIsCleanNoopNotDataLoss is a regression test
+// for the F08 finding (external security audit): installing a version
+// that's already active must be a clean, expected "nothing to do" outcome
+// (ErrAlreadyInstalled), never reach store.Store.Stage at all -- otherwise
+// a manifest offering the same version again (e.g. a re-check on the same
+// channel) followed by any Extract failure could destroy the still-active
+// release (see store.ErrAlreadyActive and the store-level regression test
+// in agent/updates/store/store_test.go).
+func TestInstallSameVersionAgainIsCleanNoopNotDataLoss(t *testing.T) {
+	ctrl := &fakeController{}
+	env := newTestEnv(t, map[string]components.Controller{"dashboard": ctrl})
+	env.registerManifest(t, "stable", map[string]string{"dashboard": "1.0.0"}, time.Now())
+
+	if _, err := env.mgr.Install(context.Background(), "dashboard", updates.InstallOptions{}); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+
+	// Same manifest, same version, offered again -- Install must refuse
+	// cleanly rather than re-extracting into the live release directory.
+	_, err := env.mgr.Install(context.Background(), "dashboard", updates.InstallOptions{})
+	if !errors.Is(err, updates.ErrAlreadyInstalled) {
+		t.Fatalf("second install of the same version = %v, want ErrAlreadyInstalled", err)
+	}
+
+	// The originally-installed content must be completely intact.
+	dir, derr := store.New(env.baseDir, "dashboard").CurrentDir()
+	if derr != nil {
+		t.Fatalf("CurrentDir: %v", derr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "marker")); statErr != nil {
+		t.Fatalf("live release content is gone after a same-version reinstall attempt: %v", statErr)
 	}
 }
 

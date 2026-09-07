@@ -184,6 +184,57 @@ func TestInstalledVersionsEmptyBeforeAnyStage(t *testing.T) {
 	}
 }
 
+// TestStageRefusesAlreadyActiveVersion is a regression test for the F08
+// finding (external security audit): Stage(version) computes the release
+// directory purely from the version string (ReleaseDir), so staging the
+// SAME version that is already "current" reuses the live release
+// directory in place. Before this fix, a failed extraction into that
+// directory would then have its DiscardStaged(true) cleanup delete the
+// still-active release -- confirmed by direct reproduction (stage the
+// same version again, corrupt the artifact write to make Extract fail,
+// discard staged with removeFiles=true, and watch the live release's own
+// files disappear). This proves Stage now refuses outright instead.
+func TestStageRefusesAlreadyActiveVersion(t *testing.T) {
+	base := t.TempDir()
+	s := store.New(base, "agent")
+
+	dir, err := s.Stage("1.0.0")
+	if err != nil {
+		t.Fatalf("Stage(1.0.0): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agentd"), []byte("v1.0.0 binary"), 0o755); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	if err := s.Promote(); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+
+	// Re-staging the now-active version must be refused, not silently
+	// hand back the live release directory.
+	if _, err := s.Stage("1.0.0"); !errors.Is(err, store.ErrAlreadyActive) {
+		t.Fatalf("Stage(1.0.0) again = %v, want ErrAlreadyActive", err)
+	}
+
+	// The live release must be completely untouched -- prove there is
+	// nothing staged to discard, so a caller's error-path cleanup
+	// (DiscardStaged) has nothing destructive to act on.
+	if _, ok, _ := s.Staged(); ok {
+		t.Error("expected nothing to be staged after Stage refused the already-active version")
+	}
+	curDir, err := s.CurrentDir()
+	if err != nil {
+		t.Fatalf("CurrentDir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(curDir, "agentd")); err != nil {
+		t.Fatalf("the live release's own file is gone: %v", err)
+	}
+
+	// A genuinely different version must still stage normally.
+	if _, err := s.Stage("2.0.0"); err != nil {
+		t.Fatalf("Stage(2.0.0) (a real new version) should succeed: %v", err)
+	}
+}
+
 // TestComponentPathTraversalRejected is a regression test for the F03
 // finding (external security audit): a component name reaching Store
 // unvalidated let filepath.Join(baseDir, component) resolve outside

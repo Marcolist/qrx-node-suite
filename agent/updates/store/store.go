@@ -38,9 +38,25 @@ func (s *Store) CurrentDir() (string, error) {
 // directory; Stage itself does not know how to extract any particular
 // artifact format (see agent/updates/components for per-component
 // staging/extraction).
+//
+// Refuses to stage a version equal to the one currently active
+// (ErrAlreadyActive): version's release directory IS the live "current"
+// directory in that case (ReleaseDir is purely a function of the version
+// string), so extracting into it writes over the live release's own files
+// in place, and a failed extraction's DiscardStaged(true) cleanup would
+// then delete the still-active release out from under the running
+// process -- confirmed by direct reproduction (a version offered again by
+// the update source, e.g. a re-check on the same channel, followed by a
+// transient extraction failure, e.g. a corrupted download). Regression fix
+// for an external security audit's F08 finding.
 func (s *Store) Stage(version string) (dir string, err error) {
 	if err := s.validate(); err != nil {
 		return "", err
+	}
+	if cur, ok, err := s.Current(); err != nil {
+		return "", err
+	} else if ok && cur == version {
+		return "", fmt.Errorf("%w: %q is already the active version for component %q", ErrAlreadyActive, version, s.component)
 	}
 	dir = s.ReleaseDir(version)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
