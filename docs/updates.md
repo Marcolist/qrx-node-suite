@@ -97,14 +97,20 @@ becomes `current`, `staged` pointer cleared) -> `RollbackToPrevious` (swaps
 `retain=2`). Every pointer write is a temp-file-then-`os.Rename`, atomic on
 every target platform -- see `agent/updates/store/atomic.go`.
 
-`Stage(version)` refuses outright (`store.ErrAlreadyActive`) if `version` is
-already the component's `current` one, and `Manager.Install` checks for this
-even earlier (`ErrAlreadyInstalled`, before ever calling `Stage`): a
-release's directory is purely a function of its version string
-(`releases/<version>`), so staging the already-active version would reuse
-the live `current` directory in place, and a failed extraction there would
-then have its cleanup delete the still-active release out from under the
-running process. Fix for an external security audit's F08 finding.
+`Stage(version)` refuses outright if `version` is already the component's
+`current` one (`store.ErrAlreadyActive`) or its `previous` one
+(`store.ErrAlreadyPrevious`), and `Manager.Install` checks for both even
+earlier (`ErrAlreadyInstalled` / `ErrAlreadyPrevious`, before ever calling
+`Stage`): a release's directory is purely a function of its version string
+(`releases/<version>`), so staging either would reuse that live directory in
+place, and a failed extraction there would then have its cleanup delete a
+release a pointer still references -- the running process's own binary for
+`current`, or the only rollback target for `previous`. Fix for an external
+security audit's F08 finding (`current`) and R03, an external re-review of
+that fix (`previous` -- reachable via `AllowDowngrade`, which
+`CheckNotDowngrade` explicitly permits). A caller wanting to reactivate the
+previous version should call `Rollback` instead of reinstalling it through
+`Install` -- an atomic pointer swap needing no download or re-extraction.
 
 ## Safe update process
 

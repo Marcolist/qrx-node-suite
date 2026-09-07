@@ -235,6 +235,72 @@ func TestStageRefusesAlreadyActiveVersion(t *testing.T) {
 	}
 }
 
+// TestStageRefusesPreviousVersionToo is a regression test for the R03
+// finding (external re-review of the F08 fix): F08's fix only refused
+// staging the CURRENT version, not the PREVIOUS (rollback-target) one.
+// Since AllowDowngrade permits re-offering an older version, and Stage's
+// release directory is purely a function of the version string, staging
+// the previous version again reused its own live directory as a staging
+// target -- and a failed extraction's DiscardStaged(true) cleanup then
+// deleted the one and only rollback target, after which
+// RollbackToPrevious still reported success and left "current" pointing
+// at a directory that no longer existed. Confirmed by direct
+// reproduction before this fix. This proves Stage now refuses that too,
+// and that the previous release's own files, and rollback itself, both
+// keep working.
+func TestStageRefusesPreviousVersionToo(t *testing.T) {
+	base := t.TempDir()
+	s := store.New(base, "agent")
+
+	dir1, err := s.Stage("1.0.0")
+	if err != nil {
+		t.Fatalf("Stage(1.0.0): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir1, "agentd"), []byte("v1.0.0 binary"), 0o755); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	if err := s.Promote(); err != nil {
+		t.Fatalf("Promote(1.0.0): %v", err)
+	}
+
+	dir2, err := s.Stage("2.0.0")
+	if err != nil {
+		t.Fatalf("Stage(2.0.0): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir2, "agentd"), []byte("v2.0.0 binary"), 0o755); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	if err := s.Promote(); err != nil {
+		t.Fatalf("Promote(2.0.0): %v", err)
+	}
+	// current=2.0.0, previous=1.0.0.
+
+	if _, err := s.Stage("1.0.0"); !errors.Is(err, store.ErrAlreadyPrevious) {
+		t.Fatalf("Stage(1.0.0) (the previous/rollback-target version) = %v, want ErrAlreadyPrevious", err)
+	}
+
+	// Nothing must have been staged, and the previous release's own file
+	// must be completely intact.
+	if _, ok, _ := s.Staged(); ok {
+		t.Error("expected nothing staged after Stage refused the previous version")
+	}
+	if _, err := os.Stat(filepath.Join(dir1, "agentd")); err != nil {
+		t.Fatalf("the previous release's own file is gone: %v", err)
+	}
+
+	// Rollback must still actually work afterward.
+	if err := s.RollbackToPrevious(); err != nil {
+		t.Fatalf("RollbackToPrevious: %v", err)
+	}
+	cur, ok, err := s.Current()
+	if err != nil || !ok || cur != "1.0.0" {
+		t.Fatalf("Current() after rollback = %q, %v, %v; want 1.0.0, true, nil", cur, ok, err)
+	}
+	if _, err := os.Stat(filepath.Join(s.ReleaseDir(cur), "agentd")); err != nil {
+		t.Fatalf("current (after rollback) points at a directory missing its own file: %v", err)
+	}
+}
+
 // TestComponentPathTraversalRejected is a regression test for the F03
 // finding (external security audit): a component name reaching Store
 // unvalidated let filepath.Join(baseDir, component) resolve outside

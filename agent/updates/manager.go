@@ -323,6 +323,18 @@ func (m *Manager) Install(ctx context.Context, component string, opts InstallOpt
 	if err := manifest.CheckNotDowngrade(curVersion, comp.Version, opts.AllowDowngrade); err != nil {
 		return nil, err
 	}
+	if prevVersion, ok, err := st.Previous(); err != nil {
+		return nil, err
+	} else if ok && prevVersion == comp.Version {
+		// Same short-circuit as ErrAlreadyInstalled above, for the other
+		// version Stage now also refuses (store.ErrAlreadyPrevious, R03):
+		// reinstalling the exact version already recorded as the rollback
+		// target should never go through Install at all -- Rollback is the
+		// existing, atomic, no-download way to reactivate it, and reaching
+		// Stage here would risk the previous release's own directory on a
+		// failed extraction.
+		return nil, fmt.Errorf("%w: %s -- use Rollback instead", ErrAlreadyPrevious, comp.Version)
+	}
 
 	cv := m.currentVersions()
 	if err := manifest.CheckCompatibility(comp, cv.SuiteVersion, cv.QRXCoreVersion, cv.AdapterVersion); err != nil {

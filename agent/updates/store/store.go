@@ -40,15 +40,24 @@ func (s *Store) CurrentDir() (string, error) {
 // staging/extraction).
 //
 // Refuses to stage a version equal to the one currently active
-// (ErrAlreadyActive): version's release directory IS the live "current"
-// directory in that case (ReleaseDir is purely a function of the version
-// string), so extracting into it writes over the live release's own files
-// in place, and a failed extraction's DiscardStaged(true) cleanup would
-// then delete the still-active release out from under the running
-// process -- confirmed by direct reproduction (a version offered again by
-// the update source, e.g. a re-check on the same channel, followed by a
-// transient extraction failure, e.g. a corrupted download). Regression fix
-// for an external security audit's F08 finding.
+// (ErrAlreadyActive) OR equal to the rollback target (ErrAlreadyPrevious):
+// version's release directory IS the live "current" or "previous"
+// directory in either case (ReleaseDir is purely a function of the version
+// string), so extracting into it writes over that release's own files in
+// place, and a failed extraction's DiscardStaged(true) cleanup would then
+// delete a release a pointer still references -- for "current", the
+// running process's own binary; for "previous", the one and only rollback
+// target RollbackToPrevious can revert to. Both confirmed by direct
+// reproduction (F08: a version offered again by the update source, e.g. a
+// re-check on the same channel; R03, an external re-review of the F08 fix:
+// staging the PREVIOUS version again -- allowed by CheckNotDowngrade with
+// AllowDowngrade, and by F08's fix, which only checked "current" -- then a
+// failed extraction destroyed the actual rollback target, after which
+// RollbackToPrevious still reported success and left "current" pointing at
+// a directory that no longer existed). A caller wanting to reactivate the
+// previous version should use RollbackToPrevious itself -- an atomic
+// pointer swap needing no download or re-extraction at all -- rather than
+// reinstalling it through Stage.
 func (s *Store) Stage(version string) (dir string, err error) {
 	if err := s.validate(); err != nil {
 		return "", err
@@ -57,6 +66,11 @@ func (s *Store) Stage(version string) (dir string, err error) {
 		return "", err
 	} else if ok && cur == version {
 		return "", fmt.Errorf("%w: %q is already the active version for component %q", ErrAlreadyActive, version, s.component)
+	}
+	if prev, ok, err := s.Previous(); err != nil {
+		return "", err
+	} else if ok && prev == version {
+		return "", fmt.Errorf("%w: %q is the rollback target for component %q -- use RollbackToPrevious instead of reinstalling it", ErrAlreadyPrevious, version, s.component)
 	}
 	dir = s.ReleaseDir(version)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

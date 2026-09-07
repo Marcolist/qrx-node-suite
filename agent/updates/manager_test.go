@@ -425,6 +425,50 @@ func TestInstallSameVersionAgainIsCleanNoopNotDataLoss(t *testing.T) {
 	}
 }
 
+// TestInstallRefusesReinstallingThePreviousVersion is a regression test
+// for the R03 finding (an external re-review of the F08 fix): F08 only
+// short-circuited Install for the CURRENTLY ACTIVE version, not the
+// PREVIOUS (rollback-target) one -- and CheckNotDowngrade explicitly
+// permits re-offering an older version when AllowDowngrade is set, so
+// Install would reach store.Store.Stage for the previous version, which
+// (before the store-level R03 fix) reused that version's own live
+// directory as a staging target and could destroy it on a failed
+// extraction. This proves Install now refuses early instead, and that
+// the previous release survives and Rollback still works.
+func TestInstallRefusesReinstallingThePreviousVersion(t *testing.T) {
+	ctrl := &fakeController{}
+	env := newTestEnv(t, map[string]components.Controller{"dashboard": ctrl})
+
+	env.registerManifest(t, "stable", map[string]string{"dashboard": "1.0.0"}, time.Now())
+	if _, err := env.mgr.Install(context.Background(), "dashboard", updates.InstallOptions{}); err != nil {
+		t.Fatalf("install 1.0.0: %v", err)
+	}
+	env.registerManifest(t, "stable", map[string]string{"dashboard": "2.0.0"}, time.Now().Add(time.Minute))
+	if _, err := env.mgr.Install(context.Background(), "dashboard", updates.InstallOptions{}); err != nil {
+		t.Fatalf("install 2.0.0: %v", err)
+	}
+	// current=2.0.0, previous=1.0.0.
+
+	env.registerManifest(t, "stable", map[string]string{"dashboard": "1.0.0"}, time.Now().Add(2*time.Minute))
+	_, err := env.mgr.Install(context.Background(), "dashboard", updates.InstallOptions{AllowDowngrade: true})
+	if !errors.Is(err, updates.ErrAlreadyPrevious) {
+		t.Fatalf("reinstalling the previous version with AllowDowngrade = %v, want ErrAlreadyPrevious", err)
+	}
+
+	// The previous release's content must be intact, and Rollback (the
+	// correct way to reactivate it) must still work.
+	dir := store.New(env.baseDir, "dashboard").ReleaseDir("1.0.0")
+	if _, statErr := os.Stat(filepath.Join(dir, "marker")); statErr != nil {
+		t.Fatalf("previous release content is gone: %v", statErr)
+	}
+	if _, err := env.mgr.Rollback(context.Background(), "dashboard", "test"); err != nil {
+		t.Fatalf("Rollback after refused reinstall: %v", err)
+	}
+	if got := env.currentVersion(t, "dashboard"); got != "1.0.0" {
+		t.Errorf("current after Rollback = %q, want 1.0.0", got)
+	}
+}
+
 // TestCheckRejectsUnknownComponentBeforeTouchingStore is a regression test
 // for the F03 finding (external security audit): POST /api/v1/updates/check
 // and /updates/plan are intentionally unauthenticated (docs/updates.md#update-status),

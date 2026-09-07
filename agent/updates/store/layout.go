@@ -37,6 +37,13 @@ var ErrInvalidComponent = errors.New("store: invalid component name")
 // directory.
 var ErrAlreadyActive = errors.New("store: version is already the active version")
 
+// ErrAlreadyPrevious means Stage was asked to stage the version that is
+// currently the component's rollback target -- see Stage's doc comment
+// (R03, external security re-review of the F08 fix) for why this is
+// refused rather than silently reusing the previous release's own
+// directory as a staging target.
+var ErrAlreadyPrevious = errors.New("store: version is the current rollback target")
+
 // Store manages one component's on-disk releases and current/previous/staged
 // pointers under baseDir/component.
 type Store struct {
