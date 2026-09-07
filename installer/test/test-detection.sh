@@ -142,6 +142,47 @@ else
   echo "  (skipped: ${SIG_FIXTURES} not present -- run installer/test/gen-fixtures.sh)"
 fi
 
+echo "== verify_release refuses an unsigned GitHub release (F01) =="
+if [[ -d "$SIG_FIXTURES" ]]; then
+  # Mock download(): serve fixture bytes for a couple of fake URLs instead
+  # of curling, so this exercises verify_release()'s real control flow
+  # (not just verify_signature() in isolation) without network access.
+  # shellcheck disable=SC2329
+  download() {
+    local url="$1" dest="$2"
+    case "$url" in
+      dev://asset) cp "${SIG_FIXTURES}/data.txt" "$dest" ;;
+      dev://sums) cp "${SIG_FIXTURES}/sums.txt" "$dest" ;;
+      dev://sig) cp "${SIG_FIXTURES}/sums.txt.sig" "$dest" ;;
+      *) return 1 ;;
+    esac
+  }
+
+  WORKDIR="$(mktemp -d)"
+  LOG_FILE="/tmp/qrx-test.log"
+  QRX_TRUSTED_PUBLIC_KEY_B64="$(cat "${SIG_FIXTURES}/pub.b64")"
+  QRX_LOCAL_TARBALL=""
+  ASSET_NAME="data.txt"
+  ASSET_URL="dev://asset"
+  SUMS_URL="dev://sums"
+  RELEASE_TAG="v-test"
+
+  SIG_URL=""
+  release_out="$(verify_release 2>&1)"
+  release_status=$?
+  assert_eq "missing SIG_URL is refused (F01)" "1" "$release_status"
+  assert_contains "refusal names the reason" "$release_out" "no SHA256SUMS.sig"
+  [[ -f "${WORKDIR}/data.txt" ]] && rm -f "${WORKDIR}/data.txt" # verify_release downloads before refusing; start clean for the next case
+
+  SIG_URL="dev://sig"
+  assert_status "present + valid SIG_URL is accepted" 0 verify_release
+
+  unset -f download
+  rm -rf "$WORKDIR"
+else
+  echo "  (skipped: ${SIG_FIXTURES} not present -- run installer/test/gen-fixtures.sh)"
+fi
+
 echo ""
 echo "${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

@@ -110,20 +110,33 @@ touches your firewall -- see [Firewall](#firewall).
 
 ## Release security
 
-Every release tarball is checked against a published `SHA256SUMS`. When the release
-also publishes `SHA256SUMS.sig`, `install.sh` verifies that signature (Ed25519, raw
-message) against a public key compiled into the script itself, using nothing but
-`openssl` + coreutils (no extra dependency, no network fetch of the key). This
-mirrors the trust model `agent/updates/manifest` already uses for OTA updates
-(`docs/security.md`): the signing key is never the same credential as GitHub
-publishing access, so a compromised release/publishing account alone cannot make
-`install.sh` accept a tampered release.
+Every GitHub-sourced release tarball must pass two checks, in order: an Ed25519
+signature (raw message) over the release's `SHA256SUMS`, verified against a public
+key compiled into `install.sh` itself, using nothing but `openssl` + coreutils (no
+extra dependency, no network fetch of the key); then the tarball's own SHA256
+checksum against that now-trusted `SHA256SUMS`. **A release with no signature, or
+one that fails verification, is refused outright** -- `install.sh` does not fall
+back to checksum-only trust, because the checksum comes from the same release
+location being verified: without the signature, "no attacker" and "an attacker who
+stripped the signature" are indistinguishable. This mirrors the trust model
+`agent/updates/manifest` already uses for OTA updates (`docs/security.md`): the
+signing key is never the same credential as GitHub publishing access, so a
+compromised release/publishing account alone cannot make `install.sh` accept a
+tampered release.
 
-`.github/workflows/release.yml` signs `SHA256SUMS` with
-`agent/cmd/sign-checksums`, using a private key from the `RELEASE_SIGNING_PRIVATE_KEY`
-repository secret (never committed). If that secret isn't set, the workflow still
-publishes the release but only with `SHA256SUMS` (unsigned); `install.sh` falls
-back to checksum-only verification in that case and says so.
+`.github/workflows/release.yml` signs `SHA256SUMS` with `agent/cmd/sign-checksums`,
+using a private key from the `RELEASE_SIGNING_PRIVATE_KEY` repository secret (never
+committed), and **refuses to publish a release at all if that secret isn't set** --
+an unsigned release would be one `install.sh` can never actually install, so
+publishing it anyway would just be a broken release with a misleading green
+checkmark. Set the secret (see `docs/deployment.md#signing-keys`) before tagging a
+release.
+
+The `QRX_LOCAL_TARBALL` testing/offline-install hook (see
+[Environment variables](#environment-variables)) is a deliberately separate trust
+boundary: it never touches GitHub at all, so there is no release signature to check
+-- the operator supplying a local tarball is trusting it out of band. SHA256
+verification still applies there.
 
 ## Upgrades
 

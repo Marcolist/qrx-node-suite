@@ -379,14 +379,18 @@ verify_release() {
     download "$ASSET_URL" "$tarball"
     download "$SUMS_URL" "$sums"
 
-    if [[ -n "$SIG_URL" && "$SIG_URL" != "null" ]]; then
-      local sig="${WORKDIR}/SHA256SUMS.sig"
-      download "$SIG_URL" "$sig"
-      verify_signature "$sums" "$sig" || die "SHA256SUMS signature verification FAILED -- this release does not match the project's trusted signing key. Refusing to install a release that fails signature verification. This could mean a compromised release, a MITM, or a corrupted download; it is never safe to bypass."
-      ok "release signature verified against the project's trusted key"
-    else
-      warn "release ${RELEASE_TAG} has no SHA256SUMS.sig -- falling back to checksum-only verification (no signature to check). See docs/installer.md#release-security."
-    fi
+    # A missing signature is a hard failure, not a graceful degrade to
+    # checksum-only trust: the checksum itself comes from the same
+    # release location being verified, so "no signature" and "attacker
+    # stripped the signature" are indistinguishable, and treating the
+    # former as acceptable makes the latter a trivial bypass of the
+    # whole trust anchor. See docs/installer.md#release-security.
+    [[ -n "$SIG_URL" && "$SIG_URL" != "null" ]] \
+      || die "release ${RELEASE_TAG} has no SHA256SUMS.sig -- refusing to install an unsigned release. Every release must be signed with the project's trusted key before install.sh will trust it (see docs/installer.md#release-security); this is never safe to bypass. If you maintain this project, set the RELEASE_SIGNING_PRIVATE_KEY repository secret so .github/workflows/release.yml signs releases."
+    local sig="${WORKDIR}/SHA256SUMS.sig"
+    download "$SIG_URL" "$sig"
+    verify_signature "$sums" "$sig" || die "SHA256SUMS signature verification FAILED -- this release does not match the project's trusted signing key. Refusing to install a release that fails signature verification. This could mean a compromised release, a MITM, or a corrupted download; it is never safe to bypass."
+    ok "release signature verified against the project's trusted key"
   fi
 
   local expected actual
