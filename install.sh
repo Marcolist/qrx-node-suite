@@ -42,10 +42,34 @@ QRX_LOCAL_TARBALL="${QRX_LOCAL_TARBALL:-}"
 # The project's release-signing public key (agent/cmd/gen-signing-key).
 # This is the trust anchor for verify_release()'s signature check -- it
 # must never be fetched from the same release location it verifies (that
-# would let a compromised release location trust itself). It is the same
-# key family used by the Agent's own OTA manifest verification
-# (docs/updates.md#update-manifest, docs/security.md).
+# would let a compromised release location trust itself).
+#
+# Deliberately a DIFFERENT keypair from QRX_TRUSTED_MANIFEST_PUBLIC_KEY_B64
+# below, per docs/deployment.md#signing-keys: this one signs the release
+# TARBALL's SHA256SUMS (agent/cmd/sign-checksums, this installer's own
+# verify_signature), the other signs OTA update MANIFESTS
+# (agent/cmd/sign-manifest, agent/updates/manifest, verified by the
+# installed Agent itself, not this script). Keeping them separate means a
+# compromise of one signing flow (e.g. the machine/secret that signs
+# releases) doesn't also let an attacker push a malicious self-update to
+# every already-installed Agent, or vice versa.
 QRX_TRUSTED_PUBLIC_KEY_B64="tIxWU9IsRUw1/TwS+mvkhBUjPWVezLQZ9S3uVm6BSJs="
+
+# The OTA update manifest signing public key (agent/cmd/gen-signing-key,
+# agent/updates/manifest) -- written into every install's generated
+# agent.json as updates.public_key_base64, the trust anchor the Agent
+# itself uses for every future update.Manager.Install/Check call (never
+# used by this script). Before this was wired in here, write_config()
+# left updates.public_key_base64 as "", which means
+# manifest.VerifyManifestSignature/VerifyArtifact fail closed on every
+# manifest and artifact (manifest.ErrNoPublicKey) -- self-update could
+# never succeed on ANY real install, regardless of anything else being
+# fixed (a gap the external security re-review flagged directly). See
+# .github/workflows/release.yml's "Sign OTA update manifests" step (the
+# MANIFEST_SIGNING_PRIVATE_KEY repo secret) for where the corresponding
+# private key signs manifests -- that secret is not the same as
+# RELEASE_SIGNING_PRIVATE_KEY, see the comment above.
+QRX_TRUSTED_MANIFEST_PUBLIC_KEY_B64="mXM+5S/vc9F+poSegmqBqOLsOXMb9NpU7kAtLDTdoHk="
 
 INSTALLER_VERSION="1"
 TOTAL_STEPS=8
@@ -749,7 +773,7 @@ write_config() {
   "admin_token": "${ADMIN_TOKEN}",
   "telegram": { "enabled": false, "token": "", "chat_id": "" },
   "updates": {
-    "public_key_base64": "${QRX_TRUSTED_PUBLIC_KEY_B64}",
+    "public_key_base64": "${QRX_TRUSTED_MANIFEST_PUBLIC_KEY_B64}",
     "source_kind": "github",
     "github_owner": "${QRX_REPO_OWNER}",
     "github_repo": "${QRX_REPO_NAME}",

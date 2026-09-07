@@ -141,6 +141,138 @@ jobs:
           docker exec qrx-test curl -fsS http://127.0.0.1:8787/health
           docker exec qrx-test systemctl is-enabled qrx-agent.service
 
+      # R05 (external security re-review): confirms install.sh's
+      # bootstrap_agent_ota_store actually produced the symlink chain a
+      # self-update needs to ever take effect, not just a plain binary
+      # copy -- ${QRX_PREFIX}/bin/agentd must resolve into the OTA store's
+      # "current" release, or Store.Promote() flipping "current" later
+      # would have nothing downstream to affect.
+      - name: Verify the OTA store bootstrap
+        run: |
+          resolved="$(docker exec qrx-test readlink -f /opt/qrx-node-suite/bin/agentd)"
+          echo "resolved: $resolved"
+          echo "$resolved" | grep -q '/var/lib/qrx-node-suite/components/agent/releases/0.0.0-ci/agentd'
+
+      # Everything from here to "Roll back the self-update" is the actual,
+      # end-to-end proof that R05 works: a real self-update install and
+      # rollback, against real systemd, in a real (if disposable) OTA
+      # store -- not just unit tests around the pieces. source_kind=local
+      # (agent/updates/sources.LocalFileSource) stands in for GitHub only
+      # as a transport: agent/updates/sources' package doc says the same
+      # verification pipeline applies "regardless of source", and this
+      # sandbox has no way to stand up a fake GitHub releases API. Every
+      # byte downstream of "fetch these bytes" -- manifest/artifact
+      # signature verification, Store.Stage/Promote, the
+      # ${QRX_PREFIX}/bin/agentd symlink chain, RequestSelfRestart, and
+      # cmd/agentd's exit-on-pending-restart -- runs unmodified.
+      - name: Build a second agentd version for the self-update test
+        run: |
+          (cd agent && go build -o ../agentd-b \
+            -ldflags "-X main.suiteVersion=0.0.1-ci-b -X main.agentVersion=0.0.1-ci-b" \
+            ./cmd/agentd)
+          chmod 0755 agentd-b
+
+      - name: Build and sign a local OTA update manifest for the self-update test
+        run: |
+          agent_sha="$(sha256sum agentd-b | cut -d' ' -f1)"
+          jq -n \
+            --arg released_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg sha "$agent_sha" \
+            '{
+              manifest_version: 1,
+              channel: "stable",
+              suite_version: "0.0.1-ci-b",
+              released_at: $released_at,
+              components: {
+                agent: {version: "0.0.1-ci-b", url: "/workspace/agentd-b", sha256: $sha, signature: ""}
+              },
+              manifest_signature: ""
+            }' >ota-manifest.json
+          # A disposable test-only keypair, generated fresh for this CI
+          # run and discarded at the end -- never the real
+          # MANIFEST_SIGNING_PRIVATE_KEY (see release.yml and
+          # docs/deployment.md#signing-keys).
+          (cd agent && go run ./cmd/gen-signing-key -priv ../ota-signing-key.priv -pub ../ota-signing-key.pub)
+          (cd agent && go run ./cmd/sign-manifest \
+            -key ../ota-signing-key.priv -manifest ../ota-manifest.json -out ../ota-manifest.json)
+
+      - name: Point the installed Agent at the local OTA test source
+        run: |
+          docker exec qrx-test cat /etc/qrx-node-suite/agent.json >agent.json.orig
+          jq --arg pk "$(cat ota-signing-key.pub)" \
+            '.updates.source_kind = "local"
+             | .updates.local_manifest_path_template = "/workspace/ota-manifest.json"
+             | .updates.public_key_base64 = $pk' \
+            agent.json.orig >agent.json.patched
+          docker cp agent.json.patched qrx-test:/etc/qrx-node-suite/agent.json
+          docker exec qrx-test chown qrx-agent:qrx-agent /etc/qrx-node-suite/agent.json
+          docker exec qrx-test chmod 0640 /etc/qrx-node-suite/agent.json
+          docker exec qrx-test systemctl restart qrx-agent.service
+          for _ in $(seq 1 30); do
+            docker exec qrx-test curl -fsS http://127.0.0.1:8787/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          docker exec qrx-test curl -fsS http://127.0.0.1:8787/health
+
+      - name: Install the self-update and verify it actually restarts onto the new binary
+        run: |
+          admin_token="$(docker exec qrx-test jq -r .admin_token /etc/qrx-node-suite/agent.json)"
+          docker exec qrx-test curl -fsS -X POST \
+            -H "Authorization: Bearer ${admin_token}" \
+            -H "Content-Type: application/json" \
+            -d '{"component":"agent"}' \
+            http://127.0.0.1:8787/api/v1/updates/install | tee install-result.json
+          grep -q '"pending_restart":true' install-result.json
+
+          # RequestSelfRestart exits the process shortly after this HTTP
+          # response (cmd/agentd/main.go); systemd's Restart=always then
+          # starts a fresh one. Poll /api/v1/version rather than a fixed
+          # sleep for that restart, and its own health check, to land.
+          reported=""
+          for _ in $(seq 1 30); do
+            reported="$(docker exec qrx-test curl -fsS http://127.0.0.1:8787/api/v1/version 2>/dev/null | jq -r .agent_version 2>/dev/null || true)"
+            [[ "$reported" == "0.0.1-ci-b" ]] && break
+            sleep 1
+          done
+          [[ "$reported" == "0.0.1-ci-b" ]] || {
+            echo "agent never reported version 0.0.1-ci-b after the self-update (last saw: '$reported')"
+            exit 1
+          }
+          docker exec qrx-test systemctl is-active qrx-agent.service
+
+          # The actual R05 proof: systemd's ExecStart is a fixed path that
+          # never changes -- this symlink chain resolving to the newly
+          # promoted release is entirely what made the update take effect.
+          resolved="$(docker exec qrx-test readlink -f /opt/qrx-node-suite/bin/agentd)"
+          echo "resolved: $resolved"
+          echo "$resolved" | grep -q '/var/lib/qrx-node-suite/components/agent/releases/0.0.1-ci-b/agentd'
+
+      - name: Roll back the self-update and verify it actually restarts back
+        run: |
+          admin_token="$(docker exec qrx-test jq -r .admin_token /etc/qrx-node-suite/agent.json)"
+          docker exec qrx-test curl -fsS -X POST \
+            -H "Authorization: Bearer ${admin_token}" \
+            -H "Content-Type: application/json" \
+            -d '{"component":"agent"}' \
+            http://127.0.0.1:8787/api/v1/updates/rollback | tee rollback-result.json
+          grep -q '"pending_restart":true' rollback-result.json
+
+          reported=""
+          for _ in $(seq 1 30); do
+            reported="$(docker exec qrx-test curl -fsS http://127.0.0.1:8787/api/v1/version 2>/dev/null | jq -r .agent_version 2>/dev/null || true)"
+            [[ "$reported" == "0.0.0-ci" ]] && break
+            sleep 1
+          done
+          [[ "$reported" == "0.0.0-ci" ]] || {
+            echo "agent never reported version 0.0.0-ci after the rollback (last saw: '$reported')"
+            exit 1
+          }
+          docker exec qrx-test systemctl is-active qrx-agent.service
+
+          resolved="$(docker exec qrx-test readlink -f /opt/qrx-node-suite/bin/agentd)"
+          echo "resolved: $resolved"
+          echo "$resolved" | grep -q '/var/lib/qrx-node-suite/components/agent/releases/0.0.0-ci/agentd'
+
       - name: Uninstall (default, keeps nothing to purge -- just checks it runs cleanly)
         run: |
           docker exec qrx-test qrx-node-suite uninstall --yes
