@@ -224,12 +224,23 @@ jobs:
       - name: Install the self-update and verify it actually restarts onto the new binary
         run: |
           admin_token="$(docker exec qrx-test jq -r .admin_token /etc/qrx-node-suite/agent.json)"
-          docker exec qrx-test curl -fsS -X POST \
+          # Deliberately no curl -f here: on a non-2xx response -f discards
+          # the body entirely, which is exactly the diagnostic information
+          # needed if this step ever fails (this API's error responses are
+          # {"error": "..."} -- see agent/api/httputil.go's httpError).
+          # Status is checked explicitly instead, from curl's own -w output.
+          response="$(docker exec qrx-test curl -sS -X POST \
             -H "Authorization: Bearer ${admin_token}" \
             -H "Content-Type: application/json" \
             -d '{"component":"agent"}' \
-            http://127.0.0.1:8787/api/v1/updates/install | tee install-result.json
-          grep -q '"pending_restart":true' install-result.json
+            -w '\n%{http_code}' \
+            http://127.0.0.1:8787/api/v1/updates/install)"
+          body="${response%$'\n'*}"
+          status="${response##*$'\n'}"
+          echo "status: $status"
+          echo "body: $body"
+          [[ "$status" == "200" ]] || { echo "expected 200, got $status"; exit 1; }
+          echo "$body" | grep -q '"pending_restart":true'
 
           # RequestSelfRestart exits the process shortly after this HTTP
           # response (cmd/agentd/main.go); systemd's Restart=always then
@@ -257,12 +268,18 @@ jobs:
       - name: Roll back the self-update and verify it actually restarts back
         run: |
           admin_token="$(docker exec qrx-test jq -r .admin_token /etc/qrx-node-suite/agent.json)"
-          docker exec qrx-test curl -fsS -X POST \
+          response="$(docker exec qrx-test curl -sS -X POST \
             -H "Authorization: Bearer ${admin_token}" \
             -H "Content-Type: application/json" \
             -d '{"component":"agent"}' \
-            http://127.0.0.1:8787/api/v1/updates/rollback | tee rollback-result.json
-          grep -q '"pending_restart":true' rollback-result.json
+            -w '\n%{http_code}' \
+            http://127.0.0.1:8787/api/v1/updates/rollback)"
+          body="${response%$'\n'*}"
+          status="${response##*$'\n'}"
+          echo "status: $status"
+          echo "body: $body"
+          [[ "$status" == "200" ]] || { echo "expected 200, got $status"; exit 1; }
+          echo "$body" | grep -q '"pending_restart":true'
 
           reported=""
           for _ in $(seq 1 30); do
