@@ -627,8 +627,28 @@ install_release() {
 
   [[ -f "${extract_dir}/agentd" ]] || die "release package is missing the agentd binary -- this looks like a broken/incomplete release artifact."
 
+  # The OTA store needs the agentd binary's REAL version (it becomes
+  # store.Store.Current(), which every future downgrade/replay check
+  # compares against as a semantic version -- manifest.CheckNotDowngrade's
+  # version.Compare falls back to a raw string comparison for anything
+  # that doesn't parse as one) -- never $RELEASE_VERSION verbatim, which
+  # is the literal string "local" for a QRX_LOCAL_TARBALL install (offline
+  # installs and this project's own Docker smoke test; see
+  # QRX_LOCAL_TARBALL's own comment above). "local" doesn't parse as a
+  # semantic version, so it silently loses every future lexicographic
+  # comparison against a real one (e.g. "0.0.1" < "local" as plain
+  # strings), making CheckNotDowngrade reject every subsequent update as a
+  # downgrade -- reproduced via installer-ci.yml's Docker smoke test
+  # before this fix. The tarball's own VERSION file (present in every
+  # release this project has ever built, see release.yml/installer-ci.yml's
+  # packaging steps) always has the real one, whether the tarball came
+  # from GitHub or a local file.
+  local ota_version
+  ota_version="$(tr -d '[:space:]' <"${extract_dir}/VERSION" 2>/dev/null || true)"
+  [[ -n "$ota_version" ]] || ota_version="$RELEASE_VERSION"
+
   install -d -m 0750 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" "$QRX_DATA_DIR"
-  bootstrap_agent_ota_store "${extract_dir}/agentd" "$RELEASE_VERSION"
+  bootstrap_agent_ota_store "${extract_dir}/agentd" "$ota_version"
 
   if [[ -d "${extract_dir}/dashboard" ]]; then
     rm -rf "${QRX_PREFIX}/dashboard"

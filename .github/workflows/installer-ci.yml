@@ -79,9 +79,16 @@ jobs:
       - name: Install libsqlite3-dev (build dependency, host-side only)
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
 
+      # -ldflags matches release.yml's real release builds (agentVersion ==
+      # the VERSION file's content below) -- without this, the binary keeps
+      # its "0.1.0-dev" source default, which GET /api/v1/version would
+      # then report instead of "0.0.0-ci", breaking the self-update test
+      # steps' own version assertions further down.
       - name: Build agentd
         working-directory: agent
-        run: go build -o ../agentd ./cmd/agentd
+        run: |
+          go build -ldflags "-X main.suiteVersion=0.0.0-ci -X main.agentVersion=0.0.0-ci" \
+            -o ../agentd ./cmd/agentd
 
       - name: Build dashboard
         working-directory: dashboard
