@@ -115,6 +115,14 @@ type CheckResult struct {
 	BlockReason       string `json:"block_reason,omitempty"`
 	RestartRequired   bool   `json:"restart_required"`
 	RollbackAvailable bool   `json:"rollback_available"`
+	// CheckError is set when fetching/verifying the manifest itself failed
+	// (network down, source misconfigured, bad signature, replay) --
+	// distinct from Blocked, which means the check succeeded but policy
+	// says no. Current/RollbackAvailable/RestartRequired/Pinned are still
+	// populated even when this is set, since those don't require reaching
+	// the update source at all: a dashboard should keep showing what's
+	// installed even when it can't currently tell what's latest.
+	CheckError string `json:"check_error,omitempty"`
 }
 
 // Check performs CHECK for one component: fetch+verify the manifest for its
@@ -143,10 +151,16 @@ func (m *Manager) Check(ctx context.Context, component string) (CheckResult, err
 	if ctrl, ok := m.Controllers[component]; ok {
 		result.RestartRequired = ctrl.RequiresRestart()
 	}
+	pin, pinned, err := m.Policy.Pin(ctx, component)
+	if err != nil {
+		return CheckResult{}, err
+	}
+	result.Pinned = pinned
 
 	mf, err := m.fetchVerifiedManifest(ctx, channel)
 	if err != nil {
-		return CheckResult{}, err
+		result.CheckError = err.Error()
+		return result, nil
 	}
 	comp, ok := mf.Components[component]
 	if !ok {
@@ -154,14 +168,9 @@ func (m *Manager) Check(ctx context.Context, component string) (CheckResult, err
 	}
 	result.Latest = comp.Version
 
-	if pin, pinned, err := m.Policy.Pin(ctx, component); err != nil {
-		return CheckResult{}, err
-	} else if pinned {
-		result.Pinned = true
-		if comp.Version != pin {
-			result.Blocked = true
-			result.BlockReason = fmt.Sprintf("pinned to %s", pin)
-		}
+	if pinned && comp.Version != pin {
+		result.Blocked = true
+		result.BlockReason = fmt.Sprintf("pinned to %s", pin)
 	}
 
 	if cur == "" || version.GT(comp.Version, cur) {

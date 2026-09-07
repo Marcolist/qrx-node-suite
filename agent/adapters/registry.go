@@ -269,6 +269,22 @@ func (r *Registry) Active() Adapter {
 	return a
 }
 
+// Configure looks up (instantiating if necessary) the named adapter and
+// hands it to fn, before that adapter is ever activated. Concrete adapters
+// that need connection settings (qrx007, legacy006 -- see their SetConfig
+// methods) are configured this way rather than the Adapter interface
+// growing an adapter-specific method every implementation would have to
+// stub out. Calling Configure after the adapter is already active is not
+// supported -- reconfigure before Activate.
+func (r *Registry) Configure(name string, fn func(Adapter)) error {
+	a, err := r.getOrCreate(name)
+	if err != nil {
+		return err
+	}
+	fn(a)
+	return nil
+}
+
 // ActiveName returns the active adapter's registry name, or "" if none.
 func (r *Registry) ActiveName() string {
 	r.mu.RLock()

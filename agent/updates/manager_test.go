@@ -363,6 +363,33 @@ func TestCheckReportsIncompatibleUpdateAsBlocked(t *testing.T) {
 	}
 }
 
+func TestCheckReportsCheckErrorInsteadOfFailingOutright(t *testing.T) {
+	ctrl := &fakeController{requiresRestart: true}
+	env := newTestEnv(t, map[string]components.Controller{"dashboard": ctrl})
+	// Install a version so there's real Current/RollbackAvailable data to
+	// preserve even when the manifest fetch below fails.
+	env.registerManifest(t, "stable", map[string]string{"dashboard": "1.0.0"}, time.Now())
+	if _, err := env.mgr.Install(context.Background(), "dashboard", updates.InstallOptions{}); err != nil {
+		t.Fatalf("install 1.0.0: %v", err)
+	}
+	// No manifest registered for "stable" now (simulates a source outage /
+	// misconfiguration) -- Check must not fail outright, since a dashboard
+	// showing "what's installed" should survive "can't reach the update
+	// server right now."
+	delete(env.src.Manifests, "stable")
+
+	result, err := env.mgr.Check(context.Background(), "dashboard")
+	if err != nil {
+		t.Fatalf("Check returned an error instead of a partial result: %v", err)
+	}
+	if result.CheckError == "" {
+		t.Error("expected CheckError to be set")
+	}
+	if result.Current != "1.0.0" {
+		t.Errorf("Current = %q, want 1.0.0 (must survive a failed manifest fetch)", result.Current)
+	}
+}
+
 func sha256Hex(t *testing.T, s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
