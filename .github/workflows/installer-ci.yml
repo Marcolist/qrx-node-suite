@@ -145,7 +145,14 @@ jobs:
 
       - name: Container logs (on failure)
         if: failure()
-        run: docker logs qrx-test || true
+        run: |
+          docker logs qrx-test || true
+          echo "--- qrx-agent.service status ---"
+          docker exec qrx-test systemctl status qrx-agent.service --no-pager || true
+          echo "--- qrx-agent.service journal ---"
+          docker exec qrx-test journalctl -u qrx-agent.service --no-pager || true
+          echo "--- install log ---"
+          docker exec qrx-test cat /var/log/qrx-node-suite/install.log || true
 
       - name: Clean up
         if: always()

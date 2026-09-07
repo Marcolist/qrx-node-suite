@@ -271,7 +271,12 @@ FETCH_BIN=""
 
 preflight() {
   detect_package_manager
-  ensure_packages ca-certificates curl tar gzip jq
+  # libsqlite3-0 is a RUNTIME dependency, not just a build one: agentd is
+  # cgo-linked against the system libsqlite3 (docs/deployment.md#sqlite-
+  # runtime-dependency, agent/storage/sqlite/README.md) and fails to start
+  # at all without it -- caught by installer-ci.yml's Docker smoke test,
+  # where the base image has no reason to already have it installed.
+  ensure_packages ca-certificates curl tar gzip jq libsqlite3-0
   FETCH_BIN="curl"
 
   if [[ -z "$QRX_LOCAL_TARBALL" ]]; then
@@ -409,6 +414,7 @@ hex_to_bin() {
     # string (not passed as a %s argument) for printf's own \xHH escape
     # processing to turn them into a single byte -- see install.sh's test
     # coverage (installer/test/) for why the %s form was wrong.
+    # shellcheck disable=SC2059
     printf "\\x${byte}" >>"$out"
   done
 }

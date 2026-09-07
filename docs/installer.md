@@ -25,8 +25,10 @@ sudo bash install.sh
    `uname -m`, not guesswork.
 2. **Checks prerequisites**: root, a supported architecture, network reachability,
    free disk space, systemd. Installs a handful of small runtime packages if missing
-   (`ca-certificates`, `curl`, `tar`, `gzip`, `jq`, `openssl`) via `apt-get` --
-   never a compiler toolchain.
+   (`ca-certificates`, `curl`, `tar`, `gzip`, `jq`, `openssl`, and
+   `libsqlite3-0` -- `agentd` is cgo-linked against it, see
+   `docs/deployment.md#sqlite-runtime-dependency`) via `apt-get` -- never a
+   compiler toolchain.
 3. **Finds the latest release** via the GitHub Releases API (`stable` channel by
    default; see [Environment variables](#environment-variables) for `beta`).
 4. **Downloads and verifies** the release tarball: SHA256 checksum against a

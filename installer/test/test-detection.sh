@@ -66,39 +66,53 @@ assert_status() {
 }
 
 echo "== detect_arch =="
-uname() { echo "x86_64"; }
+# uname is invoked indirectly, from install.sh's detect_arch() (`uname -m`)
+# -- shellcheck can't trace calls across the `source` boundary into
+# install.sh, hence the disable below.
+MOCK_UNAME_OUTPUT=""
+# shellcheck disable=SC2329
+uname() { echo "$MOCK_UNAME_OUTPUT"; }
+
+MOCK_UNAME_OUTPUT="x86_64"
 detect_arch
 assert_eq "x86_64 -> amd64" "amd64" "$GOARCH"
 
-uname() { echo "aarch64"; }
+MOCK_UNAME_OUTPUT="aarch64"
 detect_arch
 assert_eq "aarch64 -> arm64" "arm64" "$GOARCH"
 
-uname() { echo "armv7l"; }
+MOCK_UNAME_OUTPUT="armv7l"
 assert_status "armv7l is rejected" 1 detect_arch
 
-uname() { echo "riscv64"; }
+MOCK_UNAME_OUTPUT="riscv64"
 assert_status "unknown arch is rejected" 1 detect_arch
 unset -f uname
+unset MOCK_UNAME_OUTPUT
 
 echo "== detect_os =="
 FIXTURES="${REPO_ROOT}/installer/test/fixtures"
 
+# QRX_OS_RELEASE_FILE is read by install.sh's detect_os() (sourced above);
+# shellcheck can't see that across the `source` boundary.
+# shellcheck disable=SC2034
 QRX_OS_RELEASE_FILE="${FIXTURES}/ubuntu-24.04.os-release"
 detect_os
 assert_eq "ubuntu 24.04 ID" "ubuntu" "$DISTRO"
 assert_eq "ubuntu 24.04 VERSION_ID" "24.04" "$DISTRO_VERSION"
 
+# shellcheck disable=SC2034
 QRX_OS_RELEASE_FILE="${FIXTURES}/debian-12.os-release"
 detect_os
 assert_eq "debian 12 ID" "debian" "$DISTRO"
 
+# shellcheck disable=SC2034
 QRX_OS_RELEASE_FILE="${FIXTURES}/unknown.os-release"
 unknown_out="$(detect_os 2>&1)"
 unknown_status=$?
 assert_eq "unrecognized distro does not die" "0" "$unknown_status"
 assert_contains "unrecognized distro warns" "$unknown_out" "not one of the officially tested targets"
 
+# shellcheck disable=SC2034
 QRX_OS_RELEASE_FILE="/nonexistent/os-release"
 assert_status "missing os-release dies" 1 detect_os
 unset QRX_OS_RELEASE_FILE
@@ -114,7 +128,12 @@ echo "== verify_signature (real keypair round-trip) =="
 SIG_FIXTURES="${REPO_ROOT}/installer/test/fixtures/sig"
 if [[ -d "$SIG_FIXTURES" ]]; then
   WORKDIR="$(mktemp -d)"
+  # LOG_FILE and QRX_TRUSTED_PUBLIC_KEY_B64 are read by install.sh's
+  # verify_signature() (sourced above); shellcheck can't see that across
+  # the `source` boundary.
+  # shellcheck disable=SC2034
   LOG_FILE="/tmp/qrx-test.log"
+  # shellcheck disable=SC2034
   QRX_TRUSTED_PUBLIC_KEY_B64="$(cat "${SIG_FIXTURES}/pub.b64")"
   assert_status "valid signature verifies" 0 verify_signature "${SIG_FIXTURES}/data.txt" "${SIG_FIXTURES}/data.txt.sig"
   assert_status "tampered data fails verification" 1 verify_signature "${SIG_FIXTURES}/tampered.txt" "${SIG_FIXTURES}/data.txt.sig"
