@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qrx-node-suite/contracts/component-version-model.schema.json",
+  "title": "Component Version Model",
+  "description": "Mirrors agent/version.ComponentVersionModel (agent/version/model.go). No field is derived from another -- each version domain is set independently. See docs/updates.md#component-version-model.",
+  "type": "object",
+  "required": ["suite_version", "agent_version", "dashboard_version", "qrx_core_version", "api_version", "telemetry_protocol_version", "config_schema_version"],
+  "properties": {
+    "suite_version": { "type": "string" },
+    "agent_version": { "type": "string" },
+    "dashboard_version": { "type": "string" },
+    "adapter": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "qrx_compatibility": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "informational only -- the compatibility matrix, not this list, is authoritative"
+        }
+      }
+    },
+    "qrx_core_version": { "type": "string" },
+    "api_version": { "type": "string" },
+    "telemetry_protocol_version": { "type": "integer" },
+    "config_schema_version": { "type": "integer" },
+    "installer_version": { "type": "string" },
+    "compatibility_profile_version": { "type": "integer" }
+  }
+}

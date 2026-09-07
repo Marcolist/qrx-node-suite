@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qrx-node-suite/contracts/check-result.schema.json",
+  "title": "Update Check Result",
+  "description": "Mirrors agent/updates.CheckResult (agent/updates/manager.go) -- one component's CHECK outcome, used by GET /api/v1/versions, GET /api/v1/updates, and POST /api/v1/updates/check|plan.",
+  "type": "object",
+  "required": ["component", "channel", "update_available", "pinned", "compatible", "blocked", "restart_required", "rollback_available"],
+  "properties": {
+    "component": { "type": "string" },
+    "channel": { "type": "string" },
+    "current": { "type": "string" },
+    "latest": { "type": "string" },
+    "update_available": { "type": "boolean" },
+    "pinned": { "type": "boolean" },
+    "compatible": { "type": "boolean" },
+    "blocked": { "type": "boolean" },
+    "block_reason": { "type": "string" },
+    "restart_required": { "type": "boolean" },
+    "rollback_available": { "type": "boolean" },
+    "check_error": {
+      "type": "string",
+      "description": "set when the manifest fetch itself failed (network, signature, replay) -- distinct from blocked, which means the check succeeded but policy says no."
+    }
+  }
+}

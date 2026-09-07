@@ -1,0 +1,30 @@
+[Unit]
+Description=QRX Node Suite Agent
+Documentation=https://github.com/Marcolist/qrx-node-suite
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qrx-agent
+Group=qrx-agent
+ExecStart=/opt/qrx-node-suite/bin/agentd -config /etc/qrx-node-suite/agent.json
+WorkingDirectory=/opt/qrx-node-suite
+Restart=always
+RestartSec=2
+
+# Self-update relies on this: a self-binary OTA update
+# (docs/updates.md#self-binary-components) stages+promotes the new binary
+# and then the Agent process exits; systemd restarting it here is what
+# makes it actually run the new version, which then calls
+# Manager.ResumeSelfUpdate to health-check and commit or roll back.
+
+# Sandboxing -- narrow but not so narrow it can't manage qrxd or its own
+# data. Adjust ReadWritePaths if your qrxd datadir lives elsewhere.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/qrx-node-suite/var /etc/qrx-node-suite
+
+[Install]
+WantedBy=multi-user.target

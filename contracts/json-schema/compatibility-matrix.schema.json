@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qrx-node-suite/contracts/compatibility-matrix.schema.json",
+  "title": "Compatibility Matrix",
+  "description": "Mirrors agent/version.Matrix (agent/version/compatibility.go). Rows are matched by EXACT qrx_core_version + adapter_name equality -- never inferred from nearby version numbers. See docs/qrx-compatibility.md.",
+  "type": "object",
+  "required": ["matrix_version", "entries"],
+  "properties": {
+    "matrix_version": { "type": "integer", "minimum": 1 },
+    "updated_at": { "type": "string" },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["qrx_core_version", "adapter_name", "status"],
+        "properties": {
+          "qrx_core_version": { "type": "string" },
+          "adapter_name": { "type": "string", "description": "\"UNKNOWN\" marks a version with no validated adapter" },
+          "adapter_version_range": { "type": "string", "description": "agent/version.Satisfies range syntax, e.g. \"^1.0.0\" or \"*\"" },
+          "dashboard_version_range": { "type": "string" },
+          "status": { "type": "string", "enum": ["SUPPORTED", "PARTIAL", "EXPERIMENTAL", "UNSUPPORTED", "UNKNOWN"] },
+          "notes": { "type": "string" }
+        }
+      }
+    }
+  }
+}

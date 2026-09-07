@@ -1,0 +1,14 @@
+{
+  "suite_version": "0.1.0",
+  "agent_version": "0.1.0",
+  "dashboard_version": "0.1.0",
+  "adapter": {
+    "name": "qrx007",
+    "version": "1.0.0",
+    "qrx_compatibility": ["0.0.7"]
+  },
+  "qrx_core_version": "0.0.7",
+  "api_version": "v1",
+  "telemetry_protocol_version": 1,
+  "config_schema_version": 1
+}

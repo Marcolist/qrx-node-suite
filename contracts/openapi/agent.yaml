@@ -1,0 +1,193 @@
+openapi: 3.0.3
+info:
+  title: QRX Agent API
+  version: v1
+  description: >
+    Versioned REST API served by the QRX Agent (docs/architecture.md
+    section 13). Administrative endpoints (marked below) require a
+    bearer admin token and are audit-logged -- see docs/security.md.
+servers:
+  - url: http://127.0.0.1:8787
+paths:
+  /health:
+    get:
+      summary: Liveness check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string } } }
+
+  /api/v1/version:
+    get:
+      summary: Component version model
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '../json-schema/version-info.schema.json' }
+
+  /api/v1/versions:
+    get:
+      summary: Per-component installed/current/available detail (docs/updates.md#version-selection-ux)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '../json-schema/check-result.schema.json' }
+
+  /api/v1/status:
+    get:
+      summary: Aggregate health + node + system snapshot
+      responses:
+        '200': { description: OK }
+
+  /api/v1/node: { get: { summary: Normalized node status, responses: { '200': { description: OK } } } }
+  /api/v1/network: { get: { summary: Normalized network status, responses: { '200': { description: OK } } } }
+  /api/v1/blockchain: { get: { summary: Normalized blockchain status, responses: { '200': { description: OK } } } }
+  /api/v1/mempool: { get: { summary: Mempool status, responses: { '200': { description: OK } } } }
+  /api/v1/validator: { get: { summary: Validator + block producer status, responses: { '200': { description: OK } } } }
+  /api/v1/velocity: { get: { summary: VELOCITY engine + nonce lane status, responses: { '200': { description: OK } } } }
+  /api/v1/system: { get: { summary: Local host/system telemetry, responses: { '200': { description: OK } } } }
+  /api/v1/activity: { get: { summary: Recent blocks and transactions, responses: { '200': { description: OK } } } }
+  /api/v1/alerts:
+    get:
+      summary: Alert history
+      parameters:
+        - name: unresolved
+          in: query
+          schema: { type: boolean }
+      responses: { '200': { description: OK } }
+  /api/v1/services: { get: { summary: OS service status (qrxd), responses: { '200': { description: OK } } } }
+  /api/v1/settings: { get: { summary: Raw operator settings key/value dump, responses: { '200': { description: OK } } } }
+
+  /api/v1/events:
+    get:
+      summary: Server-Sent Events stream (docs/architecture.md section 14)
+      responses:
+        '200':
+          description: text/event-stream of JSON-encoded events
+          content:
+            text/event-stream: { schema: { type: string } }
+
+  /api/v1/updates:
+    get:
+      summary: Per-component update status (docs/updates.md#update-status)
+      responses: { '200': { description: OK } }
+
+  /api/v1/updates/check:
+    post:
+      summary: CHECK one component against its configured channel
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, required: [component], properties: { component: { type: string } } }
+      responses:
+        '200':
+          content: { application/json: { schema: { $ref: '../json-schema/check-result.schema.json' } } }
+
+  /api/v1/updates/plan:
+    post:
+      summary: Dry-run CHECK across several components (docs/updates.md#dry-run-planning)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { components: { type: array, items: { type: string } } }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '../json-schema/check-result.schema.json' } }
+
+  /api/v1/updates/install:
+    post:
+      summary: Install an update for one component [admin]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [component]
+              properties:
+                component: { type: string }
+                channel: { type: string }
+                allow_downgrade: { type: boolean }
+                force: { type: boolean }
+      responses:
+        '200': { description: OK }
+        '401': { description: missing/invalid admin token }
+        '403': { description: administrative endpoints disabled (no admin token configured) }
+        '409': { description: blocked (lock, pin, compatibility, downgrade, etc) }
+
+  /api/v1/updates/rollback:
+    post:
+      summary: Roll a component back to its previous version [admin]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, required: [component], properties: { component: { type: string } } }
+      responses:
+        '200': { description: OK }
+        '409': { description: no previous version, or QRX Core (use /qrx-core/switch) }
+
+  /api/v1/components/{component}/activate-version:
+    post:
+      summary: Manually activate an installed adapter [admin]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: component, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version: { type: string }
+                allow_unsupported: { type: boolean, description: "manual override past a matrix-disabled combination" }
+      responses:
+        '200': { description: OK }
+
+  /api/v1/qrx-core/switch:
+    post:
+      summary: Switch/rollback QRX Core to an already-installed version [admin] (docs/updates.md#qrx-core-version-selection)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, profile_path]
+              properties:
+                version: { type: string }
+                profile_path: { type: string, description: "path to the target version's compatibility profile JSON" }
+                expert_override: { type: boolean, description: "bypasses an UNKNOWN switch-safety dimension only, never an INCOMPATIBLE one" }
+      responses:
+        '200': { description: OK }
+        '409': { description: switch safety blocked, or version not installed }
+
+  /api/v1/services/qrx/restart:
+    post:
+      summary: Restart the qrxd service [admin]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: OK }
+        '404': { description: service restart not configured on this Agent }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        The Agent's configured admin_token (docs/security.md). Absent
+        entirely (403) when no token is configured -- administrative
+        endpoints are disabled, not open.

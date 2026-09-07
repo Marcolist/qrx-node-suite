@@ -1,0 +1,34 @@
+{
+  "listen_addr": "127.0.0.1:8787",
+  "data_dir": "./var",
+  "dashboard_dir": "./dashboard/dist",
+  "adapter": {
+    "name": "qrx007",
+    "manual_override": false,
+    "cli_path": "/usr/local/bin/qrx-cli",
+    "network": "mainnet",
+    "assumed_qrx_core_version": "0.0.7"
+  },
+  "admin_token": "CHANGE-ME-to-a-long-random-secret-or-leave-blank-to-disable-admin-endpoints",
+  "telegram": {
+    "enabled": false,
+    "token": "",
+    "chat_id": ""
+  },
+  "updates": {
+    "public_key_base64": "",
+    "source_kind": "github",
+    "github_owner": "your-org",
+    "github_repo": "qrx-node-suite",
+    "retain_versions": 2
+  },
+  "poll": {
+    "node_status_seconds": 5,
+    "network_seconds": 10,
+    "system_seconds": 5,
+    "version_hours": 6
+  },
+  "is_validator_node": false,
+  "log_format": "json",
+  "log_level": "info"
+}

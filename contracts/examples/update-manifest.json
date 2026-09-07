@@ -1,0 +1,46 @@
+{
+  "manifest_version": 1,
+  "channel": "stable",
+  "suite_version": "0.2.0",
+  "released_at": "2026-03-01T12:00:00Z",
+  "components": {
+    "adapter_qrx007": {
+      "version": "1.1.0",
+      "url": "https://github.com/example-org/qrx-node-suite/releases/download/v0.2.0/agentd-linux-amd64",
+      "sha256": "29344a2fd356a25aa77f22c55b98e16e03c0e94a4cbb2aa0ebeabcee48d81d78",
+      "signature": "SCM/8oXUDvLO3Gg01eAAOSPdaX/8S3fe9FDUiMVReJXQlTIIPj5uwwkHa4NRhOVlvCVarYNskFqJ1uitLiYmAg==",
+      "release_notes": {
+        "changes": [
+          "Fixed getvelocityinfo parsing for a QRX Core point release"
+        ],
+        "required_qrx_version": "\u003e=0.0.7"
+      }
+    },
+    "agent": {
+      "version": "0.2.0",
+      "url": "https://github.com/example-org/qrx-node-suite/releases/download/v0.2.0/agentd-linux-amd64",
+      "sha256": "ca3ff683067fe04bb515a5ad7e45e3de0d4041ceda08f238cc1e525e0fb3c9be",
+      "signature": "L8eaDPWZmKOiTwScfsouWjIZunln0Qc+MJ0hn8hSU/0st/OmXXuiiQkG0vxUnLzALgyB9WBXi3oAqUlwc188Dw==",
+      "release_notes": {
+        "released_at": "2026-03-01T12:00:00Z",
+        "changes": [
+          "Added compatibility profile hot-reload",
+          "Improved Guardian restart budget logging"
+        ],
+        "min_suite_version": "0.1.0"
+      }
+    },
+    "dashboard": {
+      "version": "0.2.0",
+      "url": "https://github.com/example-org/qrx-node-suite/releases/download/v0.2.0/dashboard-dist.tar.gz",
+      "sha256": "e21279258e0eff9fe8e16f977a0f028d2929d6ccdb4a91f16197896ce1ba5e40",
+      "signature": "88Bt1cfGYjiSICobEpx5/XgA2W9SvLtp8MiOVpxU12w0x8t/Hgz1pwuM+Z1qbUGTLwxCQ3qMcys6JXXzOBzPCg==",
+      "release_notes": {
+        "changes": [
+          "Settings -\u003e Updates: added per-component compatibility badges"
+        ]
+      }
+    }
+  },
+  "manifest_signature": "3Vf9HRhc5ySn9iwGB5IDDY4tEL3YKBNJAUPUY+rJjR/0smpLiLIJcJv4KSeJ873tbLqIZogH4mHmPebDSfUHDA=="
+}
