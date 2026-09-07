@@ -3,13 +3,18 @@ package api_test
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"qrx-node-suite/agent/adapters"
 	_ "qrx-node-suite/agent/adapters/mock"
@@ -18,6 +23,7 @@ import (
 	"qrx-node-suite/agent/storage"
 	"qrx-node-suite/agent/updates"
 	"qrx-node-suite/agent/updates/components"
+	"qrx-node-suite/agent/updates/manifest"
 	"qrx-node-suite/agent/updates/sources"
 	"qrx-node-suite/agent/version"
 )
@@ -303,5 +309,192 @@ func TestAlertsEndpoint(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&list)
 	if len(list) != 1 {
 		t.Fatalf("got %d alerts, want 1", len(list))
+	}
+}
+
+// fakeSelfBinaryController is a components.SelfBinary test double --
+// mirrors agent/updates.fakeSelfBinary (unexported there, so this package
+// needs its own) for testing that POST /api/v1/updates/install actually
+// triggers Deps.RequestSelfRestart when a self-binary Install returns
+// PendingRestart: true (the R05 fix, external security re-review).
+type fakeSelfBinaryController struct{}
+
+func (f *fakeSelfBinaryController) IsSelfBinary() bool                    { return true }
+func (f *fakeSelfBinaryController) RequiresRestart() bool                 { return true }
+func (f *fakeSelfBinaryController) Stop(ctx context.Context) error        { return nil }
+func (f *fakeSelfBinaryController) Start(ctx context.Context) error       { return nil }
+func (f *fakeSelfBinaryController) HealthCheck(ctx context.Context) error { return nil }
+func (f *fakeSelfBinaryController) Extract(ctx context.Context, artifact io.Reader, dir string) error {
+	b, err := io.ReadAll(artifact)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "marker"), b, 0o644)
+}
+
+var _ components.Controller = (*fakeSelfBinaryController)(nil)
+var _ components.SelfBinary = (*fakeSelfBinaryController)(nil)
+
+func sha256HexTest(t *testing.T, s string) string {
+	t.Helper()
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// TestUpdatesInstallTriggersRequestSelfRestartOnPendingRestart is a
+// regression test for the R05 finding (external security re-review of the
+// F07 fix): a self-binary Install stages and promotes a new version
+// correctly but, before this fix, had NO mechanism to ever make that
+// promotion take effect -- nothing ever read InstallResult.PendingRestart
+// or exited the process because of it. This proves POST
+// /api/v1/updates/install now calls Deps.RequestSelfRestart when (and
+// only when) the install result says PendingRestart: true, exercised
+// through a real HTTP round trip against a real *updates.Manager with a
+// genuinely signed manifest -- not just a unit call to the handler
+// function.
+func TestUpdatesInstallTriggersRequestSelfRestartOnPendingRestart(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	deps := newTestDeps(t, "s3cr3t")
+	src := sources.NewDevelopmentSource()
+	ctrl := &fakeSelfBinaryController{}
+	deps.Updates = &updates.Manager{
+		Source:      src,
+		PublicKey:   pub,
+		History:     storage.NewUpdateHistoryStore(mustOpenDB(t)),
+		Audit:       deps.Audit,
+		Settings:    deps.Settings,
+		Policy:      updates.NewPolicy(deps.Settings),
+		BaseDir:     t.TempDir(),
+		Controllers: map[string]components.Controller{"agent": ctrl},
+	}
+	deps.UpdateComponents = []string{"agent"}
+
+	content := "agentd-binary-v2.0.0"
+	sum := sha256HexTest(t, content)
+	sig, err := manifest.SignComponentChecksum(sum, priv)
+	if err != nil {
+		t.Fatalf("SignComponentChecksum: %v", err)
+	}
+	m := &manifest.Manifest{
+		ManifestVersion: 1, Channel: "stable", SuiteVersion: "0.2.0",
+		ReleasedAt: time.Now().UTC().Format(time.RFC3339),
+		Components: map[string]manifest.ComponentUpdate{
+			"agent": {Version: "2.0.0", URL: "dev://agent/2.0.0", SHA256: sum, Signature: sig},
+		},
+	}
+	manifest.SignManifest(m, priv)
+	src.Manifests["stable"] = m
+	src.Artifacts["dev://agent/2.0.0"] = []byte(content)
+
+	restartCalled := make(chan struct{}, 1)
+	deps.RequestSelfRestart = func() { restartCalled <- struct{}{} }
+
+	srv := httptest.NewServer(api.NewMux(deps))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/updates/install", strings.NewReader(`{"component":"agent"}`))
+	req.Header.Set("Authorization", "Bearer s3cr3t")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /updates/install: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, body)
+	}
+	var result updates.InstallResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !result.PendingRestart {
+		t.Fatal("expected a self-binary install to report PendingRestart: true")
+	}
+
+	select {
+	case <-restartCalled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("RequestSelfRestart was not called after a self-binary install with PendingRestart: true")
+	}
+}
+
+// TestUpdatesInstallDoesNotTriggerRequestSelfRestartForNonSelfBinary is
+// the symmetric check: a non-self-binary component's Install (Stop/Start/
+// HealthCheck runs synchronously, no restart needed) must never trigger
+// RequestSelfRestart -- an unconditional call regardless of PendingRestart
+// would restart the Agent process on every ordinary dashboard/adapter
+// update, which is never correct.
+func TestUpdatesInstallDoesNotTriggerRequestSelfRestartForNonSelfBinary(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	deps := newTestDeps(t, "s3cr3t")
+	src := sources.NewDevelopmentSource()
+	deps.Updates = &updates.Manager{
+		Source:      src,
+		PublicKey:   pub,
+		History:     storage.NewUpdateHistoryStore(mustOpenDB(t)),
+		Audit:       deps.Audit,
+		Settings:    deps.Settings,
+		Policy:      updates.NewPolicy(deps.Settings),
+		BaseDir:     t.TempDir(),
+		Controllers: map[string]components.Controller{"dashboard": noopController{}},
+	}
+	deps.UpdateComponents = []string{"dashboard"}
+
+	content := "dashboard-dist-v2.0.0"
+	sum := sha256HexTest(t, content)
+	sig, err := manifest.SignComponentChecksum(sum, priv)
+	if err != nil {
+		t.Fatalf("SignComponentChecksum: %v", err)
+	}
+	m := &manifest.Manifest{
+		ManifestVersion: 1, Channel: "stable", SuiteVersion: "0.2.0",
+		ReleasedAt: time.Now().UTC().Format(time.RFC3339),
+		Components: map[string]manifest.ComponentUpdate{
+			"dashboard": {Version: "2.0.0", URL: "dev://dashboard/2.0.0", SHA256: sum, Signature: sig},
+		},
+	}
+	manifest.SignManifest(m, priv)
+	src.Manifests["stable"] = m
+	src.Artifacts["dev://dashboard/2.0.0"] = []byte(content)
+
+	restartCalled := make(chan struct{}, 1)
+	deps.RequestSelfRestart = func() { restartCalled <- struct{}{} }
+
+	srv := httptest.NewServer(api.NewMux(deps))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/updates/install", strings.NewReader(`{"component":"dashboard"}`))
+	req.Header.Set("Authorization", "Bearer s3cr3t")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /updates/install: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, body)
+	}
+	var result updates.InstallResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if result.PendingRestart {
+		t.Fatal("expected a non-self-binary install to report PendingRestart: false")
+	}
+
+	select {
+	case <-restartCalled:
+		t.Fatal("RequestSelfRestart was called for a non-self-binary install -- would restart the Agent for every ordinary update")
+	case <-time.After(200 * time.Millisecond):
 	}
 }

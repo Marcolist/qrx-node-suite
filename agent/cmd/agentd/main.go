@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -251,16 +252,44 @@ func run() error {
 		if rec != nil {
 			logger.Info("resumed pending self-update", "component", component, "status", rec.Status, "to_version", rec.ToVersion)
 		}
+		if selfUpdateRollbackRequiresRestart(component, rec) {
+			return fmt.Errorf("agent self-update health check failed and was rolled back to %s -- exiting so the process supervisor restarts onto the reverted binary (this process is still running the unhealthy one)", rec.FromVersion)
+		}
 	}
 
 	sysCollector := monitoring.New()
+
+	// requestSelfRestart triggers the same graceful shutdown a SIGTERM
+	// would (cancel ctx -> srv.Shutdown -> ListenAndServe returns ->
+	// run() returns nil -> process exits 0 -> systemd's Restart=always
+	// starts a fresh process, landing on whatever ${QRX_PREFIX}/bin/agentd
+	// now resolves to via its symlink chain into the OTA store's
+	// "current" release). Delayed slightly and run in its own goroutine
+	// so the HTTP handler that triggered this (POST /api/v1/updates/
+	// install or /updates/rollback, on PendingRestart) can finish writing
+	// its response to the client first -- an operator/dashboard polling
+	// that request should see "pending_restart: true" before the
+	// connection drops, not a connection reset instead of a response.
+	// sync.Once: Install and Rollback can each trigger this, and
+	// cancel() itself is idempotent, but there's no reason to spawn more
+	// than one pending shutdown.
+	var restartOnce sync.Once
+	requestSelfRestart := func() {
+		restartOnce.Do(func() {
+			logger.Info("self-restart requested after a self-binary update -- exiting shortly so the process supervisor restarts onto it")
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				cancel()
+			}()
+		})
+	}
 
 	deps := &api.Deps{
 		Cache: api.NewCache(), Bus: bus, Guardian: g, Registry: registry,
 		Updates: mgr, QRXCore: qrxCoreMgr, Policy: policy,
 		History: historyStore, Audit: auditStore, Alerts: alertStore, Settings: settingsStore,
 		VersionInfo: versionInfo, UpdateComponents: updateComponents, AdminToken: cfg.AdminToken,
-		RestartQRXService: restartQRX, Log: logger,
+		RestartQRXService: restartQRX, RequestSelfRestart: requestSelfRestart, Log: logger,
 	}
 
 	poller := &Poller{
@@ -325,6 +354,25 @@ func parsePublicKey(b64 string) (ed25519.PublicKey, error) {
 // bootstrap-registering a version with no corresponding on-disk release
 // would defeat that fallback and break dashboard serving on every fresh
 // install.
+// selfUpdateRollbackRequiresRestart reports whether resuming a self-update
+// for component with the given history record requires exiting this
+// process so the process supervisor (systemd's Restart=always) starts a
+// fresh one that lands on the reverted binary.
+//
+// Scoped to component == "agent" only: adapter code (adapter_*) is
+// compiled into this same agentd binary (docs/architecture.md), so an
+// adapter-only rollback just changes a version-tracking pointer in the OTA
+// store, not what code this process is actually running -- restarting
+// would accomplish nothing for that case. "agent" is different: a rolled
+// back agent self-update means this process is still running the binary
+// whose health check just failed, and only an exit + restart gets it back
+// onto the reverted one (ResumeSelfUpdate's own doc comment says "the
+// caller is responsible for exiting" after a rollback -- this is that,
+// actually implemented; R05 fix, external security re-review).
+func selfUpdateRollbackRequiresRestart(component string, rec *storage.UpdateHistoryRecord) bool {
+	return component == "agent" && rec != nil && rec.Status == storage.UpdateStatusRolledBack
+}
+
 func buildControllers(baseDir string, registry *adapters.Registry, activeAdapterName string, matrix *version.Matrix, qrxCoreVersion *string, logger *slog.Logger) map[string]components.Controller {
 	agentStore := storeFor(baseDir, "agent")
 	if err := agentStore.BootstrapCurrent(agentVersion); err != nil {
