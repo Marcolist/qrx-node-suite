@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -257,6 +258,38 @@ func TestUnsignedManifestFailsValidation(t *testing.T) {
 	}
 	if err := m.Validate(); err == nil {
 		t.Fatal("expected Validate to reject a manifest with no manifest_signature")
+	}
+}
+
+// TestVerifyWithNilPublicKeyReturnsErrorNotPanic is a regression test for
+// the F07 finding (external security audit): ed25519.Verify panics if the
+// public key isn't exactly ed25519.PublicKeySize bytes, including a nil
+// key -- and cfg.Updates.PublicKeyBase64 is empty by default in
+// install.sh's generated config until an operator sets a real one
+// (agent/cmd/agentd/main.go's parsePublicKey logs a warning on that but
+// still passes the nil key through to Manager.PublicKey). Before this fix,
+// the first real manifest fetch on such an install would panic instead of
+// reporting a clean "not configured" error.
+func TestVerifyWithNilPublicKeyReturnsErrorNotPanic(t *testing.T) {
+	_, priv := testKeypair(t)
+	path, sum := writeTempArtifact(t, "content")
+	m := buildSignedManifest(t, priv, "agent", path, sum)
+
+	var nilKey ed25519.PublicKey
+	if err := manifest.VerifyManifestSignature(m, nilKey); !errors.Is(err, manifest.ErrNoPublicKey) {
+		t.Fatalf("VerifyManifestSignature(nil key) = %v, want ErrNoPublicKey", err)
+	}
+
+	c := m.Components["agent"]
+	if err := manifest.VerifyArtifact(path, c, nilKey); !errors.Is(err, manifest.ErrNoPublicKey) {
+		t.Fatalf("VerifyArtifact(nil key) = %v, want ErrNoPublicKey", err)
+	}
+
+	// A key of the wrong length (truncated/corrupted config, not just
+	// empty) must be refused the same way, not just an exactly-nil key.
+	shortKey := ed25519.PublicKey([]byte{1, 2, 3})
+	if err := manifest.VerifyManifestSignature(m, shortKey); !errors.Is(err, manifest.ErrNoPublicKey) {
+		t.Fatalf("VerifyManifestSignature(short key) = %v, want ErrNoPublicKey", err)
 	}
 }
 

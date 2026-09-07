@@ -257,7 +257,7 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.Handle("/api/", NewLoggingMiddleware(logger, apiMux))
 	mux.Handle("/health", NewLoggingMiddleware(logger, apiMux))
-	mux.Handle("/", dashboardHandler(cfg.DashboardDir))
+	mux.Handle("/", dashboardHandler(cfg.DashboardDir, storeFor(componentsBaseDir, "dashboard")))
 
 	srv := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
 	go func() {

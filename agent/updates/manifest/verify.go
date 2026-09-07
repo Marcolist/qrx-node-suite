@@ -37,6 +37,15 @@ var (
 	// Agent already saw for this channel -- possible replay of a stale,
 	// still-validly-signed manifest.
 	ErrReplayed = errors.New("manifest: manifest is not newer than the last one seen for this channel (possible replay)")
+	// ErrNoPublicKey means no valid Ed25519 public key was configured (e.g.
+	// cfg.Updates.PublicKeyBase64 is empty or malformed -- the default
+	// written by install.sh's generated config until an operator sets a
+	// real one). ed25519.Verify itself panics on a key that isn't exactly
+	// ed25519.PublicKeySize bytes (including a nil/zero-length key), so
+	// this must be checked before ever calling it: an unconfigured key
+	// must behave the same as "verification failed", not "undefined
+	// behavior/crash". See the F07 fix (external security audit).
+	ErrNoPublicKey = errors.New("manifest: no valid update manifest public key configured")
 )
 
 // VerifyManifestSignature checks the manifest's own Ed25519 signature
@@ -44,6 +53,9 @@ var (
 // per-component entries) is trusted -- see docs/security.md, "fake
 // manifest".
 func VerifyManifestSignature(m *Manifest, pub ed25519.PublicKey) error {
+	if len(pub) != ed25519.PublicKeySize {
+		return ErrNoPublicKey
+	}
 	sig, err := base64.StdEncoding.DecodeString(m.ManifestSignature)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidManifestSignature, err)
@@ -80,6 +92,9 @@ func SignComponentChecksum(sha256Hex string, priv ed25519.PrivateKey) (string, e
 // called -- an unsigned/untampered artifact entry inside a forged manifest
 // is not meaningful on its own.
 func VerifyArtifact(path string, c ComponentUpdate, pub ed25519.PublicKey) error {
+	if len(pub) != ed25519.PublicKeySize {
+		return ErrNoPublicKey
+	}
 	digest, err := sha256File(path)
 	if err != nil {
 		return err

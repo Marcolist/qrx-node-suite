@@ -159,6 +159,20 @@ itself crash:
 
 See `agent/updates/bootguard.go`.
 
+BootGuard's own logic runs *inside* the new binary's Go runtime, so it can
+never catch a restart where the kernel fails to `exec()` the binary at all
+(wrong architecture, a truncated/corrupted extraction, a stripped
+executable bit) -- there is no Go code running yet to count that attempt.
+The shipped systemd unit (`install.sh`'s `install_systemd_service()`,
+`installer/linux/qrx-agent.service`) sets `StartLimitIntervalSec=300` and
+`StartLimitBurst=8` as a complementary, OS-level circuit breaker for
+exactly that case: once systemd itself has retried that many times within
+the window, it stops and marks the unit `failed` instead of looping
+forever, without ever needing BootGuard's own SQLite-backed counter to run
+at all. Set higher than `BootGuard.MaxAttempts` so BootGuard gets the first
+chance to self-heal via rollback before this harder limit ever triggers.
+Fix for an external security audit's F07 finding.
+
 ### Dashboard and compatibility profiles
 
 These do **not** require a process restart:
@@ -167,7 +181,15 @@ These do **not** require a process restart:
   extracted (with zip-slip protection) into `releases/<version>/`. The
   Agent serves whichever directory `Store.CurrentDir()` currently resolves
   to on each request, so activation is instant. Health check: the newly
-  activated directory has an `index.html`.
+  activated directory has an `index.html`. `cmd/agentd`'s HTTP handler
+  falls back to the install-time-seeded directory (`cfg.DashboardDir`,
+  copied there by `install.sh` before the OTA store has anything
+  staged/promoted at all) only when the store has no active version yet --
+  once any dashboard update has been promoted, the store is always the
+  source of truth. Before the fix for an external audit's F07 finding, the
+  handler was wired to the static `cfg.DashboardDir` unconditionally, so a
+  dashboard OTA install could verify/stage/promote and report success with
+  zero effect on what was actually served.
 - **Compatibility profile** (`components.CompatibilityProfile`): a small
   JSON document, hot-reloaded via a `Reload` callback into whatever
   in-memory holder the rest of the Agent reads from -- no restart, no

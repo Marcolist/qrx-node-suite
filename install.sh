@@ -659,6 +659,20 @@ Description=QRX Node Suite Agent
 Documentation=https://github.com/${QRX_REPO_OWNER}/${QRX_REPO_NAME}
 After=network-online.target
 Wants=network-online.target
+# Complements agentd's own in-process crash-loop guard (BootGuard,
+# agent/updates/bootguard.go, 3 failed boots by default): BootGuard can only
+# act once a new binary's Go runtime actually starts running, so it can
+# never catch one the kernel can't even exec() at all (wrong architecture,
+# a truncated/corrupted extraction, a stripped executable bit). This is
+# systemd's own, OS-level circuit breaker for exactly that case -- after
+# StartLimitBurst restarts within StartLimitIntervalSec, systemd stops
+# retrying and marks the unit "failed" instead of looping forever. Set
+# higher than BootGuard's own attempt limit so BootGuard gets the first
+# chance to self-heal via rollback before this harder limit ever triggers.
+# See docs/updates.md's "Crash-loop guard" section (F07 fix, external
+# security audit).
+StartLimitIntervalSec=300
+StartLimitBurst=8
 
 [Service]
 Type=simple

@@ -3,6 +3,16 @@ Description=QRX Node Suite Agent
 Documentation=https://github.com/Marcolist/qrx-node-suite
 After=network-online.target
 Wants=network-online.target
+# Complements agentd's own in-process crash-loop guard (BootGuard,
+# agent/updates/bootguard.go, 3 failed boots by default): BootGuard can only
+# act once a new binary's Go runtime actually starts running, so it can
+# never catch one the kernel can't even exec() at all (wrong architecture,
+# a truncated/corrupted extraction, a stripped executable bit). This is
+# systemd's own, OS-level circuit breaker for exactly that case -- see
+# install.sh's install_systemd_service() for the fuller rationale (F07 fix,
+# external security audit).
+StartLimitIntervalSec=300
+StartLimitBurst=8
 
 [Service]
 Type=simple
