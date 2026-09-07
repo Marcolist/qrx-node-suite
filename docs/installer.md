@@ -60,7 +60,7 @@ sudo bash install.sh
 | `/opt/qrx-node-suite/bin/uninstall.sh` | Uninstaller (see below) |
 | `/etc/qrx-node-suite/agent.json` | Configuration (root + `qrx-agent` readable only) |
 | `/var/lib/qrx-node-suite/` | SQLite database, OTA component store |
-| `/var/log/qrx-node-suite/install.log` | Installer's own log |
+| `/var/log/qrx-node-suite/install.log` | Installer's own log (root-owned; see [Installer log directory](#installer-log-directory)) |
 | `/etc/systemd/system/qrx-agent.service` | systemd unit |
 | `/usr/local/bin/qrx-node-suite` | `status` / `logs` / `uninstall` convenience wrapper |
 
@@ -137,6 +137,25 @@ The `QRX_LOCAL_TARBALL` testing/offline-install hook (see
 boundary: it never touches GitHub at all, so there is no release signature to check
 -- the operator supplying a local tarball is trusting it out of band. SHA256
 verification still applies there.
+
+## Installer log directory
+
+`QRX_LOG_DIR` (`/var/log/qrx-node-suite` by default) is owned by `root:qrx-agent`,
+mode `0750` -- **not** writable by the unprivileged `qrx-agent` service user.
+Nothing in this codebase currently has `agentd` itself write into it (it logs to
+stdout/stderr, captured by `journald`); the only thing that writes there is
+`install.sh`'s own `install.log`, written while `install.sh` is running as root.
+Keeping the directory agent-writable would let a compromised `qrx-agent` process
+plant a symlink at `install.log`'s path pointing at any root-owned file; since
+re-running `install.sh` is an expected, documented flow (see
+[Upgrades](#upgrades) below) and its logging setup runs as root before it
+re-secures the directory's ownership, that symlink would later be followed and
+truncated by root -- an unprivileged-to-root arbitrary-file-truncation primitive.
+`install.sh`'s `setup_logging()` additionally refuses to write through anything at
+`install.log`'s path that isn't a plain regular file (removing it first), so even
+a system that was *first* installed by an older, vulnerable `install.sh` -- and so
+still has an agent-owned log directory left over from that earlier run -- is safe
+the moment it's re-run with a patched `install.sh`.
 
 ## Upgrades
 

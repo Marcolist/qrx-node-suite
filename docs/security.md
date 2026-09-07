@@ -27,6 +27,17 @@ addressed in `agent/updates/manifest` and `agent/updates`.
 | **Rollback abuse** (an attacker forcing repeated rollback to reintroduce a known-vulnerable version) | Rollback targets are only ever versions this Agent itself previously verified and activated (`store.Store`'s `previous` pointer) -- rollback never fetches or trusts anything new from the network. `Manager.Rollback` and `QRXCoreUpdateManager`'s binary rollback are both audit-logged (`ADMIN_ROLLBACK_*` / `ADMIN_SWITCH_QRX_CORE`), so repeated rollback activity is visible in `audit_log`, not silent. |
 | **Anonymous component-name path traversal** (an unauthenticated caller of the intentionally-public `POST /api/v1/updates/check`/`/updates/plan` endpoints supplying a `component` value like `"../../etc"`) | `Manager.Check` validates `component` against the `Controllers` allowlist before ever building a `store.Store` for it (the same gate `Rollback` already used) -- as of the fix for an external audit's F03 finding. `store.Store` itself independently rejects any component name containing a path separator or equal to `""`/`"."`/`".."` (`ErrInvalidComponent`) as defense-in-depth, so a future caller that skips the Manager-level allowlist still can't make `Store` resolve outside its `BaseDir`. Before this fix, such a name reached `filepath.Join(BaseDir, component)` unvalidated, and a pointer file (`current`/`previous`) at the resulting attacker-chosen path could have its contents returned in the JSON response. |
 
+## Installer threat model
+
+`install.sh` runs as root by necessity (it creates a system user and a systemd
+unit), which makes anywhere it writes as root, through a path an unprivileged
+process might influence, a privilege-escalation surface distinct from the OTA
+threat model above.
+
+| Threat | Mitigation |
+|---|---|
+| **Installer log symlink attack** (a compromised, unprivileged `qrx-agent` process plants a symlink at `install.log`'s path so a later root-run `install.sh` truncates an arbitrary root-owned file instead) | `QRX_LOG_DIR` is root-owned (`root:qrx-agent`, mode `0750`), not agent-writable, so `qrx-agent` can no longer place anything there at all; `setup_logging()` additionally refuses to write through anything at that path that isn't a plain regular file, removing it first -- covering a system upgraded from an older, vulnerable installer that still has an agent-owned log directory left over from its first install. As of the fix for an external audit's F04 finding; see `docs/installer.md#installer-log-directory`. |
+
 ## Hard guarantees (detail)
 
 Expanding on [`SECURITY.md`](../SECURITY.md)'s summary:

@@ -183,6 +183,42 @@ else
   echo "  (skipped: ${SIG_FIXTURES} not present -- run installer/test/gen-fixtures.sh)"
 fi
 
+echo "== setup_logging refuses to follow a symlink at LOG_FILE (F04) =="
+{
+  # Regression test for the F04 finding (external security audit):
+  # QRX_LOG_DIR was made agent-writable by install_release(), and
+  # setup_logging() (which runs as root, before install_release ever
+  # re-secures the directory on a re-run) did `: >"$LOG_FILE"`, which
+  # follows a symlink. A compromised unprivileged agent process could
+  # plant a symlink at that exact path pointing at any root-owned file,
+  # turning a routine re-run of this installer into a root-privileged
+  # arbitrary-file-truncation primitive. This proves setup_logging() now
+  # refuses to follow such a symlink: the "secret" file it points at must
+  # survive untouched, and LOG_FILE itself must end up a real regular file.
+  test_root="$(mktemp -d)"
+  # shellcheck disable=SC2034
+  QRX_LOG_DIR="${test_root}/log"
+  mkdir -p "$QRX_LOG_DIR"
+
+  secret="${test_root}/secret-owned-by-someone-else"
+  echo "do not touch me" >"$secret"
+  ln -s "$secret" "${QRX_LOG_DIR}/install.log"
+
+  setup_logging
+
+  assert_eq "LOG_FILE points at the log dir" "${QRX_LOG_DIR}/install.log" "$LOG_FILE"
+  if [[ -L "$LOG_FILE" ]]; then
+    echo "  FAIL - LOG_FILE is still a symlink after setup_logging"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  ok - LOG_FILE is a real regular file after setup_logging"
+    PASS=$((PASS + 1))
+  fi
+  assert_eq "the symlink target was never truncated" "do not touch me" "$(cat "$secret")"
+
+  rm -rf "$test_root"
+}
+
 echo ""
 echo "${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]
