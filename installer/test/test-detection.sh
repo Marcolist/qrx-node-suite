@@ -160,13 +160,22 @@ if [[ -d "$SIG_FIXTURES" ]]; then
 
   WORKDIR="$(mktemp -d)"
   LOG_FILE="/tmp/qrx-test.log"
+  # These are all read only by install.sh's verify_release() (sourced
+  # above), invisible to shellcheck across the `source` boundary.
+  # shellcheck disable=SC2034
   QRX_TRUSTED_PUBLIC_KEY_B64="$(cat "${SIG_FIXTURES}/pub.b64")"
+  # shellcheck disable=SC2034
   QRX_LOCAL_TARBALL=""
+  # shellcheck disable=SC2034
   ASSET_NAME="data.txt"
+  # shellcheck disable=SC2034
   ASSET_URL="dev://asset"
+  # shellcheck disable=SC2034
   SUMS_URL="dev://sums"
+  # shellcheck disable=SC2034
   RELEASE_TAG="v-test"
 
+  # shellcheck disable=SC2034
   SIG_URL=""
   release_out="$(verify_release 2>&1)"
   release_status=$?
@@ -174,6 +183,7 @@ if [[ -d "$SIG_FIXTURES" ]]; then
   assert_contains "refusal names the reason" "$release_out" "no SHA256SUMS.sig"
   [[ -f "${WORKDIR}/data.txt" ]] && rm -f "${WORKDIR}/data.txt" # verify_release downloads before refusing; start clean for the next case
 
+  # shellcheck disable=SC2034
   SIG_URL="dev://sig"
   assert_status "present + valid SIG_URL is accepted" 0 verify_release
 
