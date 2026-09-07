@@ -32,7 +32,8 @@ addressed in `agent/updates/manifest` and `agent/updates`.
 | **A "successful" OTA update with no real effect** (a compromised or buggy update source could -- or, before this fix, simply a normal dashboard update always did -- report success while the old, potentially-vulnerable code keeps serving every request) | `cmd/agentd`'s dashboard HTTP handler now resolves the OTA store's `Store.CurrentDir()` on every request (falling back to the install-time-seeded directory only when nothing has ever been promoted), so a promoted dashboard update takes effect on the very next request -- matching `components.Dashboard`'s `RequiresRestart()==false` design and `Manifest.Validate`'s guarantee that whatever got promoted was itself signature-verified. As of the fix for an external audit's F07 finding. |
 | **Configured adapter connection settings silently discarded** (`cfg.Adapter.CLIPath`/`Network`/`WalletName`/`DataDir` -- exactly what connects the Agent to a real QRX Core node -- never reaching the adapter that actually activates, whenever `cfg.Adapter.Name` is empty, i.e. the default automatic-selection config `install.sh` generates) | `cmd/agentd/main.go` now pre-configures every adapter returned by `adapters.Installed()`, not just one looked up by `cfg.Adapter.Name` (which is `""` in automatic mode, so the old single-name `Configure("", ...)` call looked up an adapter literally named `""`, found none, and silently did nothing) -- whichever adapter `registry.SelectAutomatic` later picks and activates has therefore already received the operator's settings via `SetConfig`. Confirmed by direct reproduction against the real `qrx007` adapter type before fixing. As of the fix for an external audit's F11 finding. |
 | **Crash loop the in-process guard can't see** (a self-update binary so broken the kernel can't even `exec()` it -- wrong architecture, a truncated/corrupted extraction, a stripped executable bit -- never gives `BootGuard` a chance to run at all, since that requires the Go runtime to already be executing) | The shipped systemd unit sets `StartLimitIntervalSec=300`/`StartLimitBurst=8` as an OS-level circuit breaker independent of `BootGuard`'s own SQLite-backed counter: once systemd itself has retried that often within the window, it stops and marks the unit `failed` rather than looping forever. Set higher than `BootGuard.MaxAttempts` so BootGuard gets the first chance to self-heal via rollback. As of the fix for an external audit's F07 finding; see `docs/updates.md`'s "Crash-loop guard" section. |
-| **Downgrade and replay protection both silently disabled on a freshly bootstrapped install** (a system that has never completed one real OTA update has an empty `store.Store.Current()`, and `manifest.CheckNotDowngrade`/`CheckNotReplayed` both explicitly treat an empty current-version/last-seen as "nothing recorded yet" and let anything through -- so an attacker, or a compromised/buggy update source, offering an older, already-patched-away-from version, or replaying a stale-but-validly-signed manifest, would have it accepted on that very first check, with neither protection able to object) | `cmd/agentd`'s `buildControllers` now calls the new `store.Store.BootstrapCurrent` for "agent" and any active adapter at every startup -- a no-op once a real OTA update has ever promoted something, but on a fresh install it registers the actually-running binary's version as the baseline before any update check can happen, restoring both protections from the very first check instead of leaving a permanent gap until the first successful update. Confirmed by direct reproduction (a test proving the downgrade is silently accepted without this fix, and rejected with it) before fixing. As of the fix for R05, an external security re-review of the F07 fix -- this fix covers the bootstrap-registration piece of R05 specifically; see the "Known limitation" note below it covers a separate, larger piece of the same finding that is not yet fixed. |
+| **Downgrade and replay protection both silently disabled on a freshly bootstrapped install** (a system that has never completed one real OTA update has an empty `store.Store.Current()`, and `manifest.CheckNotDowngrade`/`CheckNotReplayed` both explicitly treat an empty current-version/last-seen as "nothing recorded yet" and let anything through -- so an attacker, or a compromised/buggy update source, offering an older, already-patched-away-from version, or replaying a stale-but-validly-signed manifest, would have it accepted on that very first check, with neither protection able to object) | `cmd/agentd`'s `buildControllers` now calls the new `store.Store.BootstrapCurrent` for "agent" and any active adapter at every startup -- a no-op once a real OTA update has ever promoted something, but on a fresh install it registers the actually-running binary's version as the baseline before any update check can happen, restoring both protections from the very first check instead of leaving a permanent gap until the first successful update. Confirmed by direct reproduction (a test proving the downgrade is silently accepted without this fix, and rejected with it) before fixing. As of the fix for R05, an external security re-review of the F07 fix -- this fix covers the bootstrap-registration piece of R05 specifically; see below for the larger piece of the same finding (a promoted self-update binary having no path to actually run), which is now also fixed. |
+| **A "successful" self-binary OTA update with no path to ever actually run** (`Store.Promote` only ever flipped a symlink *inside* the OTA store; nothing made `${QRX_PREFIX}/bin/agentd` -- the fixed path systemd's `ExecStart` always execs -- ever resolve to what got promoted, and nothing ever read `InstallResult.PendingRestart` to exit the process so a restart could happen at all. A self-update could verify, download, stage, and flip its internal pointer correctly and have zero observable effect on what code the Agent actually executes, ever) | See `docs/updates.md#self-binary-components-agent-adapters`: `install.sh`'s `bootstrap_agent_ota_store()` now makes `${QRX_PREFIX}/bin/agentd` a symlink into the OTA store's `current` release instead of a plain file copy, so `Store.Promote()`'s existing atomic rename transitively repoints what `ExecStart` execs; `Deps.RequestSelfRestart` (called by the `updates/install`/`updates/rollback` handlers on `PendingRestart: true`) triggers the same graceful-shutdown path `SIGTERM` already used, so systemd's `Restart=always` actually gets a chance to restart onto it; and a rolled-back self-update (`selfUpdateRollbackRequiresRestart`, scoped to `agent` only) makes `cmd/agentd` exit again so the *next* restart lands on the reverted binary. As of the fix for R05 (external security re-review of the F07 fix); `installer-ci.yml`'s Docker smoke test drives a real install-then-rollback `A -> B -> A` cycle through the live HTTP API against real systemd to verify this, since this repository's own development sandbox has no working Docker/systemd to verify it directly. |
 
 ## Installer threat model
 
@@ -46,61 +47,6 @@ threat model above.
 | **Installer log symlink attack** (a compromised, unprivileged `qrx-agent` process plants a symlink at `install.log`'s path so a later root-run `install.sh` write follows it instead of the real log file) | `QRX_LOG_DIR` is root-owned (`root:qrx-agent`, mode `0750`), not agent-writable, so `qrx-agent` can no longer place anything there at all; `setup_logging()` creates `install.log` via `init_log_file()`, which opens a file descriptor (`LOG_FD`) on a private `mktemp`-generated temp file *before* that file is ever visible at the public path, then atomically `rename(2)`s it into place -- safe against both a symlink already present and one raced into place mid-install. Critically, every `log()` call for the rest of the install writes through that same held descriptor, never by reopening `install.log`'s path -- a file descriptor is bound to the underlying inode, not the path, so a symlink planted at *any later point* (not just before the first write) can no longer redirect anything. Covers a system upgraded from an older, vulnerable installer that still has an agent-owned log directory left over from its first install. As of the fix for an external audit's F04 finding, hardened by two rounds of external re-review: R02 first closed the race between checking for a symlink and truncating through it (an atomic rename replaced that check-then-act pattern), then a second re-review found the atomic rename alone only protected the *first* write -- every later `log()` call still reopened the path each time, reproducibly exploitable, closed by moving to a held file descriptor. See `docs/installer.md#installer-log-directory`. |
 | **Uninstaller delete-target hijack** (a compromised, unprivileged `qrx-agent` process points `uninstall.sh --remove-qrx-core`'s marker file at an arbitrary directory, which is then `rm -rf`'d as root) | The marker (`qrx-core-installed-by-this-installer`) lives under `QRX_CONFIG_DIR` (`root:qrx-agent`, mode `0750`), never the agent-writable `QRX_DATA_DIR`, so `qrx-agent` cannot plant or rewrite it at all. As a second, independent line of defense, `uninstall.sh` resolves the marker's content (following any symlinks) and refuses to remove anything that doesn't fall under the documented QRX Core install root (`/opt/qrx`) -- never "/", "/etc", or a symlink escape. As of the fix for an external audit's F05 finding; see `docs/installer.md#qrx-core-removal-safety`. |
 | **`--remove-qrx-core` silently doing nothing when combined with `--purge-data`** (moving the F05 marker under `QRX_CONFIG_DIR` meant `--purge-data`'s `rm -rf` of that whole directory could delete the marker before `--remove-qrx-core` ever read it -- an operator explicitly asking for both, e.g. when decommissioning a machine, would end up with QRX Core silently left behind) | `main()` now runs `remove_qrx_core` before `purge_data`, so the marker is always read while it still exists. As of the fix for R04, an external re-review of the F05 fix; see `docs/installer.md#qrx-core-removal-safety`. |
-
-## Known limitation: a promoted self-update binary has no path to actually run
-
-**This is the largest piece of the R05 finding and is NOT fixed.** Investigating
-R05 (an external security re-review of the F07 fix) surfaced something more
-severe than the finding's own description: as wired today, a self-binary OTA
-update (`agent`, or any `adapter_*`) has **no mechanism at all** for a promoted
-binary to ever actually run.
-
-- `components.Agent.Extract` writes the new binary into the OTA store's own
-  layout (`<QRX_DATA_DIR>/components/agent/releases/<version>/agentd`).
-  `store.Store.Promote` only flips symlinks *within that same layout*
-  (`current -> releases/<version>`) -- it never touches
-  `${QRX_PREFIX}/bin/agentd`, the completely separate, fixed path
-  `install.sh` writes once at install time and the shipped systemd unit's
-  `ExecStart` always execs.
-- `Manager.Install`'s self-binary path returns `InstallResult.PendingRestart:
-  true`, documented as "the caller must arrange a process restart" -- but
-  nothing in `agent/api` or `cmd/agentd` ever reads `PendingRestart` or exits
-  the process because of it. `docs/updates.md`'s "Crash-loop guard" section
-  already described `cmd/agentd` as "responsible for exiting so the process
-  supervisor restarts it"; that description was aspirational, not something
-  the code actually did.
-- Even if the process did exit, systemd would simply re-exec the exact same,
-  unchanged `${QRX_PREFIX}/bin/agentd` file -- the newly promoted binary
-  sitting in the OTA store is never the one that runs.
-
-In short: a self-binary "successful" OTA update today verifies, downloads,
-stages, and flips an internal pointer correctly, but has zero observable
-effect on what code the Agent actually executes, ever -- there is currently no
-tested path from "Promote succeeded" to "the new binary is running."
-
-**Why this isn't fixed here:** the correct fix is architectural, not a
-one-line patch -- most plausibly, making `${QRX_PREFIX}/bin/agentd` itself a
-symlink into the OTA store's `current` release (set up once by `install.sh` at
-install time, pointing into the already-agent-writable `QRX_DATA_DIR`, so
-`Promote` transitively repoints it with no `ProtectSystem=strict`/
-`ReadWritePaths` sandboxing changes needed), combined with `cmd/agentd`
-actually exiting on `PendingRestart: true` so systemd's restart re-execs
-through that symlink onto the new binary. That combination needs to be proven
-with a real `A -> B -> A` cycle -- install version A, self-update to B,
-confirm the restarted process is actually running B, force B to fail its
-health check or be non-executable, confirm systemd/BootGuard together land
-back on A -- against a real systemd instance across an actual process restart.
-This sandbox has no working Docker daemon and is not itself booted under
-systemd (confirmed: `dockerd`/`docker` are installed but there is no
-`/var/run/docker.sock` and no daemon to start one with, and `systemctl`
-reports "System has not been booted with systemd as init system"), so that
-verification cannot be done here. Shipping a change to how the Agent's own
-running binary gets selected, unverified against real process-restart
-behavior, risks leaving every future install unable to start at all with no
-way to have caught it first -- worse than the current, honestly-documented
-gap. This needs a session with real systemd/Docker test capability (this
-project's own `installer-ci.yml` Docker smoke tests are the right place to
-extend once a fix is implemented) rather than a blind attempt here.
 
 ## Hard guarantees (detail)
 

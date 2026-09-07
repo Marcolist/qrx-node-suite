@@ -55,16 +55,27 @@ sudo bash install.sh
 
 | Path | Contents |
 |---|---|
-| `/opt/qrx-node-suite/bin/agentd` | The Agent binary |
+| `/opt/qrx-node-suite/bin/agentd` | Symlink into the OTA store's active agent release (see below) -- not a plain binary file |
 | `/opt/qrx-node-suite/dashboard/` | Built dashboard static assets |
 | `/opt/qrx-node-suite/bin/uninstall.sh` | Uninstaller (see below) |
 | `/etc/qrx-node-suite/agent.json` | Configuration (root + `qrx-agent` readable only) |
 | `/var/lib/qrx-node-suite/` | SQLite database, OTA component store |
+| `/var/lib/qrx-node-suite/components/agent/` | The agent's own OTA store: `releases/<version>/agentd`, `current -> releases/<version>` |
 | `/var/log/qrx-node-suite/install.log` | Installer's own log (root-owned; see [Installer log directory](#installer-log-directory)) |
 | `/etc/systemd/system/qrx-agent.service` | systemd unit |
 | `/usr/local/bin/qrx-node-suite` | `status` / `logs` / `uninstall` convenience wrapper |
 
 This mirrors `installer/linux/qrx-agent.service`'s existing layout, not a new one.
+
+`/opt/qrx-node-suite/bin/agentd` is set up once, at install time
+(`install.sh`'s `bootstrap_agent_ota_store()`), as a symlink into
+`/var/lib/qrx-node-suite/components/agent/current/agentd` rather than a
+plain copy of the downloaded binary -- this is what lets a self-update
+(`docs/updates.md#self-binary-components-agent-adapters`) actually take
+effect: systemd's `ExecStart` always execs this same fixed path, and
+`current` is exactly what an OTA promotion atomically repoints. Nothing
+about running or managing the service changes because of this; it only
+matters if you're inspecting the filesystem directly.
 
 ## QRX Core
 
