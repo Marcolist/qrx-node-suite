@@ -802,6 +802,7 @@ write_config() {
   },
   "poll": { "node_status_seconds": 5, "network_seconds": 10, "system_seconds": 5, "version_hours": 6 },
   "is_validator_node": false,
+  "qrx_core_service_use_sudo": true,
   "log_format": "json",
   "log_level": "info"
 }
@@ -809,6 +810,47 @@ JSON
   chown "${QRX_SERVICE_USER}:${QRX_SERVICE_USER}" "$config_file"
   chmod 0640 "$config_file"
   ok "wrote configuration to ${config_file}"
+}
+
+# install_qrx_core_sudoers grants the unprivileged qrx-agent user exactly
+# enough sudo to manage qrxd.service -- nothing else -- so
+# agent/platform.Systemd (with Config.QRXCoreServiceUseSudo, set true
+# below in write_config) can actually start/stop/restart/query it without
+# running the whole Agent as root just for this one capability. Mirrors
+# installer/linux/qrx-agent-sudoers (kept as a static, human-readable
+# reference using the default username -- this generates the real rule
+# with the actual configured QRX_SERVICE_USER substituted in, the same
+# relationship install_systemd_service() below has with
+# installer/linux/qrx-agent.service).
+#
+# `visudo -c` validates the rule BEFORE it's installed where sudo will
+# actually read it: a malformed sudoers file breaks sudo for the entire
+# system, not just this one rule, so this is written to a private temp
+# file, validated, and only then installed -- never validated in place
+# after the fact. Fix for the F12 finding (external security audit):
+# this file existed in the repo already but neither install.sh nor
+# cmd/agentd ever referenced it or agent/platform.Systemd.UseSudo, so
+# Core service control could not work at all against a real qrxd.service
+# owned by a different user.
+install_qrx_core_sudoers() {
+  command -v visudo >/dev/null 2>&1 || ensure_packages sudo
+  local sudoers_file="/etc/sudoers.d/qrx-agent"
+  local tmp
+  tmp="$(mktemp)" || { warn "could not create a temp file for the qrxd.service sudoers rule -- Core service control (start/stop/restart) will not work"; return 1; }
+  cat >"$tmp" <<SUDOERS
+# Managed by install.sh -- grants ${QRX_SERVICE_USER} exactly enough sudo
+# to manage qrxd.service, nothing else. See docs/security.md's F12 note.
+${QRX_SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl start qrxd.service, /usr/bin/systemctl stop qrxd.service, /usr/bin/systemctl restart qrxd.service, /usr/bin/systemctl is-active qrxd.service
+SUDOERS
+  chmod 0440 "$tmp"
+  if ! visudo -c -f "$tmp" >>"$LOG_FILE" 2>&1; then
+    rm -f "$tmp"
+    warn "generated qrxd.service sudoers rule failed visudo validation -- not installed; Core service control (start/stop/restart) will not work"
+    return 1
+  fi
+  install -o root -g root -m 0440 "$tmp" "$sudoers_file"
+  rm -f "$tmp"
+  ok "installed ${sudoers_file} (lets ${QRX_SERVICE_USER} manage qrxd.service without running as root)"
 }
 
 # ============================================================
@@ -973,6 +1015,7 @@ main() {
 
   step "Configuring and starting services"
   write_config
+  install_qrx_core_sudoers
   install_systemd_service
 
   step "Running health checks"

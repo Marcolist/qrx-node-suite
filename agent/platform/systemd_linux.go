@@ -24,6 +24,14 @@ type Systemd struct {
 // New returns this platform's ServiceManager.
 func New() ServiceManager { return &Systemd{} }
 
+// SetUseSudo sets UseSudo after construction -- lets a caller outside this
+// build-tagged (linux-only) file configure it via a small anonymous
+// interface assertion instead of importing the concrete *Systemd type
+// directly, which would break non-Linux builds (cmd/agentd/main.go has no
+// build tag of its own). See config.Config.QRXCoreServiceUseSudo's doc
+// comment (F12 fix, external security audit).
+func (s *Systemd) SetUseSudo(v bool) { s.UseSudo = v }
+
 func (s *Systemd) run(ctx context.Context, args ...string) ([]byte, error) {
 	name := "systemctl"
 	if s.UseSudo {

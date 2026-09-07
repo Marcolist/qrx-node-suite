@@ -117,6 +117,26 @@ func TestQRXCoreUpdateHappyPath(t *testing.T) {
 	}
 }
 
+// TestQRXCoreUpdateRejectsMismatchedProfile is the F12 fix (external
+// security audit): Update must cross-check that the caller-supplied
+// compatibility profile is actually FOR the version the manifest offers,
+// the same way SwitchVersion already does (see
+// TestSwitchVersionRequiresLocallyInstalled and its siblings) -- without
+// it, CheckSwitchSafety would validate an unrelated version's profile
+// while actually switching to whatever the manifest offers.
+func TestQRXCoreUpdateRejectsMismatchedProfile(t *testing.T) {
+	env := newCoreTestEnv(t, healthyProbe())
+	env.registerCoreManifest(t, "stable", "0.0.8", time.Now())
+
+	_, err := env.mgr.Update(context.Background(), updates.UpdateOptions{
+		// Profile is for 0.0.7, but the manifest offers 0.0.8.
+		SwitchOptions: updates.SwitchOptions{Profile: fullyKnownProfile("0.0.7"), Actor: "admin"},
+	})
+	if err == nil {
+		t.Fatal("expected an error for a compatibility profile that doesn't match the manifest's offered version")
+	}
+}
+
 func TestQRXCoreUpdateValidationFailureRollsBackBinary(t *testing.T) {
 	probe := healthyProbe()
 	env := newCoreTestEnv(t, probe)

@@ -156,6 +156,15 @@ remove_software() {
   rm -f /usr/local/bin/qrx-node-suite
   echo "  - removed the qrx-node-suite command"
 
+  # install.sh's install_qrx_core_sudoers() (F12 fix, external security
+  # audit) -- an orphaned rule for a user about to be deleted below is
+  # meaningless at best, a stale grant to whatever a future unrelated user
+  # of the same name might be at worst.
+  if [[ -f /etc/sudoers.d/qrx-agent ]]; then
+    rm -f /etc/sudoers.d/qrx-agent
+    echo "  - removed /etc/sudoers.d/qrx-agent"
+  fi
+
   if id -u "$QRX_SERVICE_USER" >/dev/null 2>&1; then
     userdel "$QRX_SERVICE_USER" 2>/dev/null || true
     echo "  - removed the ${QRX_SERVICE_USER} system user"

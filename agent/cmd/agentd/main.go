@@ -188,6 +188,17 @@ func run() error {
 	bus.MaxSubscribers = 256
 
 	svcManager := platform.New()
+	// UseSudo only exists on the Linux implementation (agent/platform.
+	// Systemd, a build-tagged file this package -- untagged -- can't
+	// reference by concrete type without breaking non-Linux builds) --
+	// an anonymous interface assertion against SetUseSudo instead, a
+	// no-op on any ServiceManager that doesn't have it (e.g. Unsupported
+	// on macOS/Windows, where there is no sudoers rule to use either). See
+	// config.Config.QRXCoreServiceUseSudo's doc comment (F12 fix, external
+	// security audit).
+	if sudoable, ok := svcManager.(interface{ SetUseSudo(bool) }); ok {
+		sudoable.SetUseSudo(cfg.QRXCoreServiceUseSudo)
+	}
 	restartQRX := func(ctx context.Context) error { return svcManager.Restart(ctx, "qrxd.service") }
 	guardianRestart := func(ctx context.Context, reason string) error { return restartQRX(ctx) }
 

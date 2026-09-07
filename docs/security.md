@@ -88,7 +88,9 @@ fixed above, each with a regression test that fails against the pre-fix
 code (F14, a documentation-vs-code mismatch, is verified by the docs now
 matching the actual behavior rather than a test); F13 is partially fixed
 (see [Hard guarantees](#hard-guarantees-detail) item 7 for what's fixed,
-and below for what's still deferred). The
+and below for what's still deferred); F09, F10, and F12 are each
+partially fixed, below, with the same fixed/deferred split noted inline.
+The
 remaining findings were independently verified against the current source
 (never taken on faith from the report) and are confirmed real, but are
 deferred rather than fixed in the same pass -- each for a reason noted below,
@@ -146,23 +148,46 @@ appended to an already-large change.
   which is a large enough change to the update-execution path to warrant
   its own review rather than a patch bundled with the resource-exhaustion
   fixes above.
-- **F12 -- Core service control lacks least privilege.** Confirmed:
-  `agent/platform.New()` returns a `Systemd` service manager with
-  `UseSudo: false` by default, so `qrxd.service` start/stop/restart calls
-  have no privilege-escalation path at all as currently wired:
-  `installer/linux/qrx-agent-sudoers` exists in the repo but neither
-  `install.sh` nor `cmd/agentd/main.go` reference it or `UseSudo`
-  anywhere -- it is a dead, never-installed policy file, so Core service
-  control genuinely cannot work against a real `qrxd.service` owned by a
-  different user today; `QRXCoreUpdateManager`'s `StartCore` callback in `cmd/agentd/main.go`
-  ignores the `dir` argument it's given; no `Probe` is configured, so
-  Core health checks report "no health probe configured" rather than a
-  real liveness signal; `QRXCoreUpdateManager.Update` does not cross-check
-  the caller-supplied profile's target version the way `SwitchVersion`
-  does. Deferred: this is the real "Core/adapter binding" work the audit's
-  closing instructions name as the next priority tier, and is substantial
-  enough (a least-privilege helper design, a real health probe, wiring
-  `dir` through) to warrant its own pass.
+- **F12 -- Core service control lacks least privilege (partially fixed).**
+  Confirmed four distinct issues under this finding. **Fixed:**
+  `agent/platform.New()` returned a `Systemd` service manager with
+  `UseSudo: false` by default and nothing ever set it, so `qrxd.service`
+  start/stop/restart calls had no privilege-escalation path at all as
+  wired -- `installer/linux/qrx-agent-sudoers` existed in the repo but
+  neither `install.sh` nor `cmd/agentd/main.go` referenced it or
+  `UseSudo` anywhere, a dead, never-installed policy file, so Core
+  service control genuinely could not work against a real `qrxd.service`
+  owned by a different user. `install.sh`'s new `install_qrx_core_sudoers`
+  now generates the real rule (the actual configured
+  `QRX_SERVICE_USER`, `visudo -c`-validated before it's installed where
+  sudo will read it -- a malformed sudoers file breaks sudo system-wide,
+  not just this rule) and `Config.QRXCoreServiceUseSudo` (defaulting to
+  `false`, so `docs/development.md`'s local `go run ./cmd/agentd` --
+  without the sudoers rule or necessarily a passwordless sudo session --
+  keeps calling `systemctl` directly rather than hanging on a password
+  prompt) wires `agent/platform.Systemd.UseSudo` through an anonymous
+  interface assertion (`cmd/agentd/main.go` has no build tag of its own,
+  so it can't reference the Linux-only concrete `*Systemd` type directly
+  without breaking non-Linux builds). `QRXCoreUpdateManager.Update` now
+  cross-checks `opts.Profile.QRXCoreVersion` against the manifest's
+  offered version the same way `SwitchVersion` already did -- without it,
+  `CheckSwitchSafety` could validate a profile for an unrelated version
+  while actually switching to whatever the manifest offered. **Still
+  deferred:** `StartCore`'s `dir` argument is still ignored, and no
+  `Probe` is configured. Both need a confirmed QRX Core deployment/CLI
+  contract this project doesn't have: `docs/qrx-0.0.7-interface.md` (its
+  own "What is NOT confirmed" section) documents the `qrx-cli` command
+  surface itself as unverified, and this project's own QRX Core boundary
+  rule (`docs/architecture.md`, this document's own Scope section) is
+  that QRX Core's deployment layout is entirely outside this project's
+  authority -- unlike `agentd`'s own OTA symlink-launcher fix (R05,
+  above), which this project fully controls and could verify end-to-end,
+  building a symlink-launcher-style `StartCore` or a real height/peer-
+  sampling `Probe` against an unconfirmed interface would be exactly the
+  kind of invented behavior this codebase's own principles rule out.
+  Closing this needs either a confirmed QRX Core interface spec or an
+  explicit product decision on how far this project verifies a system it
+  doesn't own.
 - **F13 -- Mock-mode fallback is silent (partially fixed).** Confirmed
   three distinct issues under this finding. **Fixed:** an explicitly-named
   but nonexistent `-config` path used to fall back to Mock-mode defaults
