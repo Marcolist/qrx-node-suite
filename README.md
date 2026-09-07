@@ -19,6 +19,23 @@ QRX transaction semantics. It is an operations, monitoring and management layer 
 next to QRX Core and talks to it only through a replaceable adapter boundary. See
 [`docs/architecture.md`](docs/architecture.md) for the full boundary rules.
 
+## Install QRX Node Suite
+
+```sh
+curl -sSL https://raw.githubusercontent.com/Marcolist/qrx-node-suite/main/install.sh | sudo bash
+```
+
+One command, on a fresh Linux server, Raspberry Pi, or VPS: no Go, no Node.js, no
+compiling, no manual `systemd` unit editing. It downloads a signed, checksummed
+release, installs QRX Node Suite as a systemd service under a dedicated
+unprivileged user, generates a safe default configuration, starts it, and only
+prints success once the Agent is actually healthy. Supports Ubuntu 22.04/24.04,
+Debian 12, and Raspberry Pi OS 64-bit (Pi 4/5), on x86_64 and ARM64. See
+[`docs/installer.md`](docs/installer.md) for exactly what it does, every
+environment variable, the release signing/trust model, and how to uninstall.
+(For a `git clone` + local build development setup instead, see
+[Quick start (development)](#quick-start-development) below.)
+
 ```
 QRX Core -> QRX Adapter -> QRX Agent -> REST API / Event Stream / Dashboard / Guardian /
                                           Telegram / SQLite / (future) telemetry + mobile pairing
@@ -48,9 +65,11 @@ for what is verified versus assumed.
 
 ## Quick start (development)
 
-Requires Go 1.24+, a C toolchain (for the bundled SQLite driver — no external Go modules are
-used, see [`docs/adr/001-agent-language.md`](docs/adr/001-agent-language.md)), and Node.js 20+
-with npm registry access for the dashboard.
+For contributing to QRX Node Suite itself, not for running it — see
+[Install QRX Node Suite](#install-qrx-node-suite) above for that. Requires Go 1.24+, a C
+toolchain (for the bundled SQLite driver — no external Go modules are used, see
+[`docs/adr/001-agent-language.md`](docs/adr/001-agent-language.md)), and Node.js 20+ with npm
+registry access for the dashboard.
 
 ```sh
 # Agent (mock QRX adapter, no real node required)
@@ -70,6 +89,7 @@ version switching, service restarts) are disabled unless explicitly configured �
 
 ## Documentation
 
+- [`docs/installer.md`](docs/installer.md) — one-line installer: behavior, security, env vars
 - [`docs/architecture.md`](docs/architecture.md) — layered architecture and boundary rules
 - [`docs/qrx-0.0.7-interface.md`](docs/qrx-0.0.7-interface.md) — QRX 0.0.7 interface notes (verified vs. assumed)
 - [`docs/qrx-compatibility.md`](docs/qrx-compatibility.md) — compatibility matrix and profiles

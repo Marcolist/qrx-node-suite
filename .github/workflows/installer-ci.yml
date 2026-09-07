@@ -1,0 +1,152 @@
+name: Installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'install.sh'
+      - 'installer/**'
+      - 'agent/cmd/sign-checksums/**'
+      - 'agent/cmd/gen-signing-key/**'
+      - '.github/workflows/installer-ci.yml'
+  pull_request:
+    paths:
+      - 'install.sh'
+      - 'installer/**'
+      - 'agent/cmd/sign-checksums/**'
+      - 'agent/cmd/gen-signing-key/**'
+      - '.github/workflows/installer-ci.yml'
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n (syntax)
+        run: |
+          bash -n install.sh
+          bash -n installer/linux/install.sh
+          bash -n installer/linux/uninstall.sh
+          bash -n installer/qrx-core-sources.sh
+          bash -n installer/test/test-detection.sh
+          bash -n installer/test/gen-fixtures.sh
+      - name: shellcheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+          ignore_paths: dashboard/node_modules
+          additional_files: 'install.sh installer/linux/uninstall.sh installer/qrx-core-sources.sh installer/test/test-detection.sh installer/test/gen-fixtures.sh'
+
+  unit-tests:
+    name: detection unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+      # fixtures/sig/ isn't committed with a private key (there isn't one
+      # to commit -- gen-fixtures.sh generates and discards a disposable
+      # test-only keypair each run), so CI regenerates it fresh; the
+      # checked-in fixtures/sig/ in the repo is just for local `bash
+      # installer/test/test-detection.sh` convenience without needing Go.
+      - name: Regenerate signature fixtures
+        run: bash installer/test/gen-fixtures.sh
+      - name: Run unit tests
+        run: bash installer/test/test-detection.sh
+
+  docker-smoke-test:
+    name: Docker smoke test (${{ matrix.image }})
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:22.04', 'ubuntu:24.04', 'debian:12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - name: Install libsqlite3-dev (build dependency, host-side only)
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+
+      - name: Build agentd
+        working-directory: agent
+        run: go build -o ../agentd ./cmd/agentd
+
+      - name: Build dashboard
+        working-directory: dashboard
+        run: |
+          npm install
+          npm run build
+
+      - name: Package a local test tarball
+        run: |
+          pkg="qrx-node-suite_0.0.0-ci_linux_amd64"
+          mkdir -p "$pkg/dashboard"
+          cp agentd "$pkg/agentd"
+          cp -a dashboard/dist/. "$pkg/dashboard/"
+          cp LICENSE "$pkg/LICENSE"
+          cp installer/linux/uninstall.sh "$pkg/uninstall.sh"
+          chmod 0755 "$pkg/uninstall.sh"
+          cp installer/qrx-core-sources.sh "$pkg/qrx-core-sources.sh"
+          chmod 0755 "$pkg/qrx-core-sources.sh"
+          echo "0.0.0-ci" > "$pkg/VERSION"
+          # See release.yml's matching comment: no wrapping directory --
+          # install.sh expects agentd etc. directly at the archive root.
+          tar -czf "${pkg}.tar.gz" -C "$pkg" .
+          sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256sums"
+          echo "TARBALL=$(pwd)/${pkg}.tar.gz" >>"$GITHUB_ENV"
+
+      - name: Build systemd-capable test image
+        run: |
+          docker build --build-arg BASE_IMAGE=${{ matrix.image }} \
+            -t qrx-installer-test:latest \
+            -f installer/test/docker/Dockerfile installer/test/docker
+
+      - name: Start container
+        run: |
+          docker run -d --name qrx-test --privileged --cgroupns=host \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            -v "${{ github.workspace }}:/workspace:ro" \
+            qrx-installer-test:latest
+          # Wait for systemd (PID 1 inside the container) to actually be up
+          # before exec'ing into it, rather than a fixed sleep.
+          for _ in $(seq 1 30); do
+            docker exec qrx-test test -d /run/systemd/system && break
+            sleep 1
+          done
+          docker exec qrx-test test -d /run/systemd/system
+
+      - name: Install QRX Node Suite inside the container
+        run: |
+          docker exec \
+            -e QRX_LOCAL_TARBALL=/workspace/$(basename "$TARBALL") \
+            -e QRX_INSTALL_QRX_CORE=skip \
+            -e QRX_VERBOSE=1 \
+            qrx-test bash /workspace/install.sh
+
+      - name: Verify the Agent is actually healthy
+        run: |
+          docker exec qrx-test systemctl is-active qrx-agent.service
+          docker exec qrx-test curl -fsS http://127.0.0.1:8787/health
+          docker exec qrx-test systemctl is-enabled qrx-agent.service
+
+      - name: Uninstall (default, keeps nothing to purge -- just checks it runs cleanly)
+        run: |
+          docker exec qrx-test qrx-node-suite uninstall --yes
+          docker exec qrx-test bash -c '! systemctl list-unit-files | grep -q qrx-agent.service'
+
+      - name: Container logs (on failure)
+        if: failure()
+        run: docker logs qrx-test || true
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f qrx-test || true

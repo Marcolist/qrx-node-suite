@@ -1,0 +1,2 @@
+this is a fixture file used only by installer/test/test-detection.sh
+tampered
