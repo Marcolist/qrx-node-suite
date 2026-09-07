@@ -892,6 +892,22 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=${QRX_DATA_DIR} ${QRX_CONFIG_DIR} ${QRX_LOG_DIR}
+# ProtectSystem=strict makes the real /tmp read-only for this unit like
+# everything else outside ReadWritePaths -- but updates.Manager.Install and
+# QRXCoreUpdateManager.Update both download an update artifact to
+# os.CreateTemp("", ...), which defaults to /tmp. Without PrivateTmp, EVERY
+# self-update or QRX Core update install ever attempted against this unit
+# failed at the download step with "read-only file system", entirely
+# independent of anything else being correct -- caught by
+# installer-ci.yml's Docker smoke test's real self-update round trip (R05,
+# external security re-review), not any earlier round of review, since
+# nothing had ever exercised a real Install() call against the real
+# shipped sandbox before. PrivateTmp gives the unit its own isolated,
+# genuinely writable /tmp (a systemd-managed bind mount, set up before the
+# unit starts -- no capability needed by the unprivileged qrx-agent
+# process itself), which is both the fix and a further hardening: this
+# unit's temp files are no longer visible to other processes' /tmp either.
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
