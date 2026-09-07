@@ -13,7 +13,29 @@
 // each adapter, and compatibility profiles.
 package store
 
-import "path/filepath"
+import (
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+)
+
+// ErrInvalidComponent means a component name isn't safe to use as a single
+// filesystem path segment. This is defense-in-depth: the primary defense
+// against a path-traversal component name is the caller
+// (agent/updates.Manager) validating component against its Controllers
+// allowlist before ever building a Store (see the F03 fix in
+// agent/updates/manager.go's Check). This rejects anything that reaches the
+// store layer anyway -- a "../../etc"-style component would otherwise let
+// Root() resolve outside baseDir and have readPointer return the contents
+// of a file named "current"/"previous" from an attacker-chosen directory.
+var ErrInvalidComponent = errors.New("store: invalid component name")
+
+// ErrAlreadyActive means Stage was asked to stage the version that is
+// already the component's current one -- see Stage's doc comment for why
+// this is refused outright rather than silently reusing the live release
+// directory.
+var ErrAlreadyActive = errors.New("store: version is already the active version")
 
 // Store manages one component's on-disk releases and current/previous/staged
 // pointers under baseDir/component.
@@ -48,6 +70,20 @@ func (s *Store) releasesRoot() string {
 
 func (s *Store) pointerPath(name string) string {
 	return filepath.Join(s.Root(), name)
+}
+
+// validate rejects a component name that isn't a single, plain path
+// segment: empty, "." or ".." are refused, as is anything containing a
+// path separator (forward or backward slash, so a value can't smuggle a
+// multi-segment traversal past a caller that only checked for "..").
+// filepath.Join would otherwise silently resolve such a name relative to
+// baseDir instead of refusing it.
+func (s *Store) validate() error {
+	c := s.component
+	if c == "" || c == "." || c == ".." || strings.ContainsAny(c, `/\`) {
+		return fmt.Errorf("%w: %q", ErrInvalidComponent, c)
+	}
+	return nil
 }
 
 const (

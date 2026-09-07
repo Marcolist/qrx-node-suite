@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"qrx-node-suite/agent/version"
 )
@@ -36,6 +37,15 @@ var (
 	// Agent already saw for this channel -- possible replay of a stale,
 	// still-validly-signed manifest.
 	ErrReplayed = errors.New("manifest: manifest is not newer than the last one seen for this channel (possible replay)")
+	// ErrNoPublicKey means no valid Ed25519 public key was configured (e.g.
+	// cfg.Updates.PublicKeyBase64 is empty or malformed -- the default
+	// written by install.sh's generated config until an operator sets a
+	// real one). ed25519.Verify itself panics on a key that isn't exactly
+	// ed25519.PublicKeySize bytes (including a nil/zero-length key), so
+	// this must be checked before ever calling it: an unconfigured key
+	// must behave the same as "verification failed", not "undefined
+	// behavior/crash". See the F07 fix (external security audit).
+	ErrNoPublicKey = errors.New("manifest: no valid update manifest public key configured")
 )
 
 // VerifyManifestSignature checks the manifest's own Ed25519 signature
@@ -43,6 +53,9 @@ var (
 // per-component entries) is trusted -- see docs/security.md, "fake
 // manifest".
 func VerifyManifestSignature(m *Manifest, pub ed25519.PublicKey) error {
+	if len(pub) != ed25519.PublicKeySize {
+		return ErrNoPublicKey
+	}
 	sig, err := base64.StdEncoding.DecodeString(m.ManifestSignature)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidManifestSignature, err)
@@ -79,6 +92,9 @@ func SignComponentChecksum(sha256Hex string, priv ed25519.PrivateKey) (string, e
 // called -- an unsigned/untampered artifact entry inside a forged manifest
 // is not meaningful on its own.
 func VerifyArtifact(path string, c ComponentUpdate, pub ed25519.PublicKey) error {
+	if len(pub) != ed25519.PublicKeySize {
+		return ErrNoPublicKey
+	}
 	digest, err := sha256File(path)
 	if err != nil {
 		return err
@@ -161,13 +177,21 @@ func CheckNotReplayed(m *Manifest, lastSeenReleasedAt string) error {
 	if lastSeenReleasedAt == "" {
 		return nil
 	}
-	if m.ReleasedAt < lastSeenReleasedAt {
-		// RFC3339 timestamps compare correctly as strings when the
-		// timezone/format is consistent, which SignManifest/our own
-		// released_at generation guarantees (UTC, fixed layout). A
-		// manifest from an untrusted source with a nonstandard timestamp
-		// format is rejected by Manifest.Validate's RFC3339 parse
-		// elsewhere before this check runs.
+	// Parsed comparison, not string comparison: RFC3339 allows any
+	// timezone offset, not just "Z" -- "2026-09-07T01:00:00+02:00" is
+	// chronologically earlier than "2026-09-07T00:00:00Z" but sorts as
+	// the larger string. Manifest.Validate already guarantees both sides
+	// parse (rejecting a non-RFC3339 released_at before this ever runs),
+	// so these parses cannot fail here.
+	current, err := time.Parse(time.RFC3339, m.ReleasedAt)
+	if err != nil {
+		return fmt.Errorf("manifest: released_at %q is not RFC3339: %w", m.ReleasedAt, err)
+	}
+	lastSeen, err := time.Parse(time.RFC3339, lastSeenReleasedAt)
+	if err != nil {
+		return fmt.Errorf("manifest: stored last-seen released_at %q is not RFC3339: %w", lastSeenReleasedAt, err)
+	}
+	if current.Before(lastSeen) {
 		return fmt.Errorf("%w: released_at %s < last seen %s", ErrReplayed, m.ReleasedAt, lastSeenReleasedAt)
 	}
 	return nil

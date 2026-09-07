@@ -4,19 +4,39 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"qrx-node-suite/agent/updates/store"
 )
 
 // dashboardHandler serves the built dashboard (docs/updates.md#dashboard-ota-updates:
-// "The Agent serves the currently active dashboard build") from disk at
-// dir, with a client-side-routing fallback to index.html for any path that
-// doesn't match a real file, and a clear placeholder page if the directory
-// hasn't been built yet -- this sandbox has no network access to run
-// `npm install && npm run build` (see docs/development.md), so shipping a
-// go:embed'd dist/ isn't possible here; a release build process should
-// build the dashboard first and go:embed the result instead of serving
-// from disk. See docs/deployment.md.
-func dashboardHandler(dir string) http.Handler {
+// "The Agent serves the currently active dashboard build") with a
+// client-side-routing fallback to index.html for any path that doesn't
+// match a real file, and a clear placeholder page if no build is found at
+// all.
+//
+// Which directory that is, per request: st.CurrentDir() (the OTA store's
+// "current" pointer for the dashboard component) if a dashboard update has
+// ever actually been promoted through it, otherwise installDir -- the
+// build install.sh copies straight into QRX_PREFIX/dashboard at install
+// time, before the OTA store has anything staged/promoted at all. Without
+// this fallback-to-store-first resolution (fixed for an external audit's
+// F07 finding), a "successful" dashboard OTA install would verify, stage,
+// and promote correctly, yet every request would keep being served from
+// the original install.sh-copied directory forever -- Dashboard's own
+// RequiresRestart()==false design assumes the opposite: that the very
+// next request after Promote() sees the new build, with no Agent restart.
+// Resolving per request (not once at startup) is what makes that true.
+//
+// This sandbox has no network access to run `npm install && npm run build`
+// (see docs/development.md), so shipping a go:embed'd dist/ isn't possible
+// here; a release build process should build the dashboard first and
+// go:embed the result instead of serving from disk. See docs/deployment.md.
+func dashboardHandler(installDir string, st *store.Store) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dir := installDir
+		if cur, err := st.CurrentDir(); err == nil {
+			dir = cur
+		}
 		indexPath := filepath.Join(dir, "index.html")
 		if _, err := os.Stat(indexPath); err != nil {
 			servePlaceholder(w)

@@ -128,6 +128,20 @@ setup_logging() {
   if mkdir -p "$QRX_LOG_DIR" 2>/dev/null; then
     LOG_FILE="${QRX_LOG_DIR}/install.log"
   fi
+  # QRX_LOG_DIR is root-owned as of this installer version (install_release
+  # below), but a system that was first installed by an older installer may
+  # still have it owned by the unprivileged service user from that earlier
+  # run -- and this function runs before install_release() re-secures it.
+  # Never blindly truncate through whatever already exists at LOG_FILE: a
+  # compromised qrx-agent process could otherwise pre-plant a symlink there
+  # pointing at any root-owned file, turning this root-run truncate into an
+  # arbitrary-file-truncation primitive on every re-run of this installer
+  # (a documented, expected flow -- see docs/installer.md#upgrades). If
+  # anything other than a plain regular file is there, remove it first so
+  # the following redirection always creates a fresh, real file.
+  if [[ -L "$LOG_FILE" ]] || { [[ -e "$LOG_FILE" ]] && [[ ! -f "$LOG_FILE" ]]; }; then
+    rm -f "$LOG_FILE" 2>/dev/null || true
+  fi
   : >"$LOG_FILE" 2>/dev/null || true
   log "QRX Node Suite installer v${INSTALLER_VERSION} starting"
 }
@@ -379,14 +393,18 @@ verify_release() {
     download "$ASSET_URL" "$tarball"
     download "$SUMS_URL" "$sums"
 
-    if [[ -n "$SIG_URL" && "$SIG_URL" != "null" ]]; then
-      local sig="${WORKDIR}/SHA256SUMS.sig"
-      download "$SIG_URL" "$sig"
-      verify_signature "$sums" "$sig" || die "SHA256SUMS signature verification FAILED -- this release does not match the project's trusted signing key. Refusing to install a release that fails signature verification. This could mean a compromised release, a MITM, or a corrupted download; it is never safe to bypass."
-      ok "release signature verified against the project's trusted key"
-    else
-      warn "release ${RELEASE_TAG} has no SHA256SUMS.sig -- falling back to checksum-only verification (no signature to check). See docs/installer.md#release-security."
-    fi
+    # A missing signature is a hard failure, not a graceful degrade to
+    # checksum-only trust: the checksum itself comes from the same
+    # release location being verified, so "no signature" and "attacker
+    # stripped the signature" are indistinguishable, and treating the
+    # former as acceptable makes the latter a trivial bypass of the
+    # whole trust anchor. See docs/installer.md#release-security.
+    [[ -n "$SIG_URL" && "$SIG_URL" != "null" ]] \
+      || die "release ${RELEASE_TAG} has no SHA256SUMS.sig -- refusing to install an unsigned release. Every release must be signed with the project's trusted key before install.sh will trust it (see docs/installer.md#release-security); this is never safe to bypass. If you maintain this project, set the RELEASE_SIGNING_PRIVATE_KEY repository secret so .github/workflows/release.yml signs releases."
+    local sig="${WORKDIR}/SHA256SUMS.sig"
+    download "$SIG_URL" "$sig"
+    verify_signature "$sums" "$sig" || die "SHA256SUMS signature verification FAILED -- this release does not match the project's trusted signing key. Refusing to install a release that fails signature verification. This could mean a compromised release, a MITM, or a corrupted download; it is never safe to bypass."
+    ok "release signature verified against the project's trusted key"
   fi
 
   local expected actual
@@ -477,7 +495,17 @@ install_release() {
   fi
 
   install -d -m 0750 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" "$QRX_DATA_DIR"
-  install -d -m 0750 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" "$QRX_LOG_DIR"
+  # Root-owned, not agent-writable -- unlike QRX_DATA_DIR, nothing in this
+  # codebase currently has agentd write into QRX_LOG_DIR (it logs to
+  # stdout/stderr, captured by journald); this installer is the only thing
+  # that writes here (install.log). Keeping it agent-writable would let a
+  # compromised agent process plant a symlink here for install.sh's own
+  # root-run setup_logging() to later follow and truncate an arbitrary
+  # file on a re-run -- see the F04 fix in setup_logging() for the other
+  # half of this defense (re-securing an already-vulnerable existing
+  # install upgraded by a newer install.sh still needs that runtime check,
+  # since this line runs after setup_logging() in main()).
+  install -d -m 0750 -o root -g "$QRX_SERVICE_USER" "$QRX_LOG_DIR"
 
   chown -R root:root "${QRX_PREFIX}"
   chmod -R a+rX "${QRX_PREFIX}"
@@ -631,6 +659,20 @@ Description=QRX Node Suite Agent
 Documentation=https://github.com/${QRX_REPO_OWNER}/${QRX_REPO_NAME}
 After=network-online.target
 Wants=network-online.target
+# Complements agentd's own in-process crash-loop guard (BootGuard,
+# agent/updates/bootguard.go, 3 failed boots by default): BootGuard can only
+# act once a new binary's Go runtime actually starts running, so it can
+# never catch one the kernel can't even exec() at all (wrong architecture,
+# a truncated/corrupted extraction, a stripped executable bit). This is
+# systemd's own, OS-level circuit breaker for exactly that case -- after
+# StartLimitBurst restarts within StartLimitIntervalSec, systemd stops
+# retrying and marks the unit "failed" instead of looping forever. Set
+# higher than BootGuard's own attempt limit so BootGuard gets the first
+# chance to self-heal via rollback before this harder limit ever triggers.
+# See docs/updates.md's "Crash-loop guard" section (F07 fix, external
+# security audit).
+StartLimitIntervalSec=300
+StartLimitBurst=8
 
 [Service]
 Type=simple

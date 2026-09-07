@@ -142,6 +142,93 @@ else
   echo "  (skipped: ${SIG_FIXTURES} not present -- run installer/test/gen-fixtures.sh)"
 fi
 
+echo "== verify_release refuses an unsigned GitHub release (F01) =="
+if [[ -d "$SIG_FIXTURES" ]]; then
+  # Mock download(): serve fixture bytes for a couple of fake URLs instead
+  # of curling, so this exercises verify_release()'s real control flow
+  # (not just verify_signature() in isolation) without network access.
+  # shellcheck disable=SC2329
+  download() {
+    local url="$1" dest="$2"
+    case "$url" in
+      dev://asset) cp "${SIG_FIXTURES}/data.txt" "$dest" ;;
+      dev://sums) cp "${SIG_FIXTURES}/sums.txt" "$dest" ;;
+      dev://sig) cp "${SIG_FIXTURES}/sums.txt.sig" "$dest" ;;
+      *) return 1 ;;
+    esac
+  }
+
+  WORKDIR="$(mktemp -d)"
+  LOG_FILE="/tmp/qrx-test.log"
+  # These are all read only by install.sh's verify_release() (sourced
+  # above), invisible to shellcheck across the `source` boundary.
+  # shellcheck disable=SC2034
+  QRX_TRUSTED_PUBLIC_KEY_B64="$(cat "${SIG_FIXTURES}/pub.b64")"
+  # shellcheck disable=SC2034
+  QRX_LOCAL_TARBALL=""
+  # shellcheck disable=SC2034
+  ASSET_NAME="data.txt"
+  # shellcheck disable=SC2034
+  ASSET_URL="dev://asset"
+  # shellcheck disable=SC2034
+  SUMS_URL="dev://sums"
+  # shellcheck disable=SC2034
+  RELEASE_TAG="v-test"
+
+  # shellcheck disable=SC2034
+  SIG_URL=""
+  release_out="$(verify_release 2>&1)"
+  release_status=$?
+  assert_eq "missing SIG_URL is refused (F01)" "1" "$release_status"
+  assert_contains "refusal names the reason" "$release_out" "no SHA256SUMS.sig"
+  [[ -f "${WORKDIR}/data.txt" ]] && rm -f "${WORKDIR}/data.txt" # verify_release downloads before refusing; start clean for the next case
+
+  # shellcheck disable=SC2034
+  SIG_URL="dev://sig"
+  assert_status "present + valid SIG_URL is accepted" 0 verify_release
+
+  unset -f download
+  rm -rf "$WORKDIR"
+else
+  echo "  (skipped: ${SIG_FIXTURES} not present -- run installer/test/gen-fixtures.sh)"
+fi
+
+echo "== setup_logging refuses to follow a symlink at LOG_FILE (F04) =="
+{
+  # Regression test for the F04 finding (external security audit):
+  # QRX_LOG_DIR was made agent-writable by install_release(), and
+  # setup_logging() (which runs as root, before install_release ever
+  # re-secures the directory on a re-run) did `: >"$LOG_FILE"`, which
+  # follows a symlink. A compromised unprivileged agent process could
+  # plant a symlink at that exact path pointing at any root-owned file,
+  # turning a routine re-run of this installer into a root-privileged
+  # arbitrary-file-truncation primitive. This proves setup_logging() now
+  # refuses to follow such a symlink: the "secret" file it points at must
+  # survive untouched, and LOG_FILE itself must end up a real regular file.
+  test_root="$(mktemp -d)"
+  # shellcheck disable=SC2034
+  QRX_LOG_DIR="${test_root}/log"
+  mkdir -p "$QRX_LOG_DIR"
+
+  secret="${test_root}/secret-owned-by-someone-else"
+  echo "do not touch me" >"$secret"
+  ln -s "$secret" "${QRX_LOG_DIR}/install.log"
+
+  setup_logging
+
+  assert_eq "LOG_FILE points at the log dir" "${QRX_LOG_DIR}/install.log" "$LOG_FILE"
+  if [[ -L "$LOG_FILE" ]]; then
+    echo "  FAIL - LOG_FILE is still a symlink after setup_logging"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  ok - LOG_FILE is a real regular file after setup_logging"
+    PASS=$((PASS + 1))
+  fi
+  assert_eq "the symlink target was never truncated" "do not touch me" "$(cat "$secret")"
+
+  rm -rf "$test_root"
+}
+
 echo ""
 echo "${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

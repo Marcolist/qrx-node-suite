@@ -49,6 +49,12 @@ func (a *Adapter) SetConfig(cfg qrx.Config) {
 	a.runner = qrx.NewRunner(cfg)
 }
 
+// Config returns the connection config currently in effect -- read-only
+// access for diagnostics and tests (e.g. proving cmd/agentd actually
+// applied the operator's configured cli_path/network/wallet_name/data_dir
+// before activation; see the F11 fix in cmd/agentd/main.go).
+func (a *Adapter) Config() qrx.Config { return a.cfg }
+
 func (a *Adapter) Name() string                   { return "qrx007" }
 func (a *Adapter) Version() string                { return adapterVersion }
 func (a *Adapter) SupportedQRXVersions() []string { return supportedQRXVersions }

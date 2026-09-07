@@ -7,7 +7,8 @@ import (
 	"qrx-node-suite/agent/adapters"
 	_ "qrx-node-suite/agent/adapters/future"
 	_ "qrx-node-suite/agent/adapters/mock"
-	_ "qrx-node-suite/agent/adapters/qrx007"
+	"qrx-node-suite/agent/adapters/qrx007"
+	"qrx-node-suite/agent/qrx"
 	"qrx-node-suite/agent/version"
 )
 
@@ -148,5 +149,52 @@ func TestValidateCompatibilityNeverInfers(t *testing.T) {
 	}
 	if status != version.Unknown {
 		t.Errorf("status for unlisted core version = %v, want UNKNOWN", status)
+	}
+}
+
+// TestPreConfiguringEveryInstalledAdapterAppliesSettingsBeforeSelection is
+// a regression test for the F11 finding (external security audit):
+// cmd/agentd/main.go used to call registry.Configure(cfg.Adapter.Name, ...)
+// -- but cfg.Adapter.Name is EMPTY in the default, automatic-selection
+// config install.sh generates, so Configure("", ...) looked up an adapter
+// literally named "" (which never exists) and silently did nothing. The
+// adapter registry.SelectAutomatic later picked and activated would then
+// activate with its factory's zero-value defaults instead of the
+// operator's configured cli_path/network/wallet_name/data_dir -- the QRX
+// Core connection settings the installer went out of its way to detect and
+// write. The fix loops over adapters.Installed() instead of a single
+// caller-supplied name; this proves that loop, run against the real
+// qrx007 adapter type (not a fake), actually applies the settings to an
+// unactivated instance -- without ever calling Activate, which genuinely
+// shells out to qrx-cli and has no binary available in this sandbox.
+func TestPreConfiguringEveryInstalledAdapterAppliesSettingsBeforeSelection(t *testing.T) {
+	r := adapters.NewRegistry(loadMatrix(t))
+	want := qrx.Config{CLIPath: "/custom/qrx-cli", Network: "testnet", WalletName: "w1", DataDir: "/data"}
+
+	for _, name := range adapters.Installed() {
+		if err := r.Configure(name, func(a adapters.Adapter) {
+			if c, ok := a.(interface{ SetConfig(qrx.Config) }); ok {
+				c.SetConfig(want)
+			}
+		}); err != nil {
+			t.Fatalf("Configure(%s): %v", name, err)
+		}
+	}
+
+	var got qrx.Config
+	sawInstance := false
+	if err := r.Configure("qrx007", func(a adapters.Adapter) {
+		if c, ok := a.(*qrx007.Adapter); ok {
+			got = c.Config()
+			sawInstance = true
+		}
+	}); err != nil {
+		t.Fatalf("Configure(qrx007) readback: %v", err)
+	}
+	if !sawInstance {
+		t.Fatal("qrx007 adapter instance was not the expected type")
+	}
+	if got != want {
+		t.Errorf("qrx007's applied config = %+v, want %+v -- SetConfig was not actually called on it", got, want)
 	}
 }

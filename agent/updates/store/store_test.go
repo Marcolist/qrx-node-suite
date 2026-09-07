@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -180,5 +181,109 @@ func TestInstalledVersionsEmptyBeforeAnyStage(t *testing.T) {
 	}
 	if len(versions) != 0 {
 		t.Errorf("expected no installed versions, got %v", versions)
+	}
+}
+
+// TestStageRefusesAlreadyActiveVersion is a regression test for the F08
+// finding (external security audit): Stage(version) computes the release
+// directory purely from the version string (ReleaseDir), so staging the
+// SAME version that is already "current" reuses the live release
+// directory in place. Before this fix, a failed extraction into that
+// directory would then have its DiscardStaged(true) cleanup delete the
+// still-active release -- confirmed by direct reproduction (stage the
+// same version again, corrupt the artifact write to make Extract fail,
+// discard staged with removeFiles=true, and watch the live release's own
+// files disappear). This proves Stage now refuses outright instead.
+func TestStageRefusesAlreadyActiveVersion(t *testing.T) {
+	base := t.TempDir()
+	s := store.New(base, "agent")
+
+	dir, err := s.Stage("1.0.0")
+	if err != nil {
+		t.Fatalf("Stage(1.0.0): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agentd"), []byte("v1.0.0 binary"), 0o755); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	if err := s.Promote(); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+
+	// Re-staging the now-active version must be refused, not silently
+	// hand back the live release directory.
+	if _, err := s.Stage("1.0.0"); !errors.Is(err, store.ErrAlreadyActive) {
+		t.Fatalf("Stage(1.0.0) again = %v, want ErrAlreadyActive", err)
+	}
+
+	// The live release must be completely untouched -- prove there is
+	// nothing staged to discard, so a caller's error-path cleanup
+	// (DiscardStaged) has nothing destructive to act on.
+	if _, ok, _ := s.Staged(); ok {
+		t.Error("expected nothing to be staged after Stage refused the already-active version")
+	}
+	curDir, err := s.CurrentDir()
+	if err != nil {
+		t.Fatalf("CurrentDir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(curDir, "agentd")); err != nil {
+		t.Fatalf("the live release's own file is gone: %v", err)
+	}
+
+	// A genuinely different version must still stage normally.
+	if _, err := s.Stage("2.0.0"); err != nil {
+		t.Fatalf("Stage(2.0.0) (a real new version) should succeed: %v", err)
+	}
+}
+
+// TestComponentPathTraversalRejected is a regression test for the F03
+// finding (external security audit): a component name reaching Store
+// unvalidated let filepath.Join(baseDir, component) resolve outside
+// baseDir, so Current()/Previous() would read a pointer file named
+// "current"/"previous" from an attacker-chosen directory instead of
+// failing. The primary fix is agent/updates.Manager.Check validating
+// component against its Controllers allowlist before ever calling
+// store.New; this test exercises the store layer's own defense-in-depth
+// (Store.validate) directly, since that's the last line of defense for any
+// future caller that reaches store.New with unvalidated input.
+func TestComponentPathTraversalRejected(t *testing.T) {
+	base := t.TempDir()
+
+	// Plant a file OUTSIDE base that a traversal could read if unvalidated:
+	// baseDir/agent-updates/../../outside/current would resolve to
+	// <parent-of-base>/outside/current.
+	outsideDir := filepath.Join(filepath.Dir(base), "outside-"+filepath.Base(base))
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("mkdir outside dir: %v", err)
+	}
+	defer os.RemoveAll(outsideDir)
+	secret := filepath.Join(outsideDir, "current")
+	if err := os.WriteFile(secret, []byte("SECRET-VERSION-STRING\n"), 0o644); err != nil {
+		t.Fatalf("write outside secret: %v", err)
+	}
+
+	traversal := "../" + filepath.Base(outsideDir)
+	s := store.New(base, traversal)
+
+	if v, ok, err := s.Current(); err == nil {
+		t.Fatalf("Current() with traversal component = %q, %v, nil error; want ErrInvalidComponent, got value read: %q", v, ok, v)
+	} else if !errors.Is(err, store.ErrInvalidComponent) {
+		t.Fatalf("Current() error = %v; want errors.Is(err, store.ErrInvalidComponent)", err)
+	}
+
+	if _, err := s.Stage("1.0.0"); !errors.Is(err, store.ErrInvalidComponent) {
+		t.Fatalf("Stage() error = %v; want ErrInvalidComponent", err)
+	}
+	if _, err := s.InstalledVersions(); !errors.Is(err, store.ErrInvalidComponent) {
+		t.Fatalf("InstalledVersions() error = %v; want ErrInvalidComponent", err)
+	}
+	if err := s.PromoteVersion("1.0.0"); !errors.Is(err, store.ErrInvalidComponent) {
+		t.Fatalf("PromoteVersion() error = %v; want ErrInvalidComponent", err)
+	}
+
+	for _, bad := range []string{"", ".", "..", "..\\outside", "sub/dir", "a/../../etc"} {
+		s := store.New(base, bad)
+		if _, _, err := s.Current(); !errors.Is(err, store.ErrInvalidComponent) {
+			t.Errorf("component %q: Current() error = %v; want ErrInvalidComponent", bad, err)
+		}
 	}
 }

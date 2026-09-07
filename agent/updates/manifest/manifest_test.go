@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -189,6 +190,62 @@ func TestCheckNotReplayedRejectsStaleManifest(t *testing.T) {
 	}
 }
 
+func TestTamperedURLFailsVerification(t *testing.T) {
+	pub, priv := testKeypair(t)
+	path, sum := writeTempArtifact(t, "agent-binary-v0.2.0")
+	m := buildSignedManifest(t, priv, "agent", path, sum)
+
+	// Splice in a different download URL without re-signing -- the
+	// artifact's own checksum/signature still protects its *content*, but
+	// url wasn't covered by the manifest signature before this fix, so a
+	// party serving the manifest could redirect the download (e.g. an
+	// SSRF-style probe of internal infrastructure) while the checksum
+	// field itself stayed untouched.
+	c := m.Components["agent"]
+	c.URL = "http://169.254.169.254/latest/meta-data/"
+	m.Components["agent"] = c
+
+	if err := manifest.VerifyManifestSignature(m, pub); err == nil {
+		t.Fatal("expected VerifyManifestSignature to fail after url tampering, got nil")
+	}
+}
+
+func TestTamperedReleaseNotesFailsVerification(t *testing.T) {
+	pub, priv := testKeypair(t)
+	path, sum := writeTempArtifact(t, "agent-binary-v0.2.0")
+	m := buildSignedManifest(t, priv, "agent", path, sum)
+
+	// Add a release_notes entry without re-signing -- this is exactly the
+	// "malicious update server" move CheckCompatibility is meant to be
+	// immune to (docs/security.md): stripping or adding a compatibility
+	// requirement to steer whether an update looks installable. Before
+	// this fix, release_notes wasn't covered by the manifest signature,
+	// so this tamper would have gone undetected.
+	c := m.Components["agent"]
+	c.ReleaseNotes = &manifest.ReleaseNotes{RequiredQRXVersion: ">=99.0.0"}
+	m.Components["agent"] = c
+	if err := manifest.VerifyManifestSignature(m, pub); err == nil {
+		t.Fatal("expected VerifyManifestSignature to fail after release_notes tampering, got nil")
+	}
+}
+
+func TestCheckNotReplayedComparesActualTimeNotStrings(t *testing.T) {
+	// "2026-09-07T01:00:00+02:00" (== 2026-09-06T23:00:00Z) is
+	// chronologically BEFORE "2026-09-07T00:00:00Z", but sorts as the
+	// larger string -- a naive string comparison would let this replay a
+	// genuinely older manifest.
+	older := &manifest.Manifest{ReleasedAt: "2026-09-07T01:00:00+02:00"}
+	lastSeen := "2026-09-07T00:00:00Z"
+	if err := manifest.CheckNotReplayed(older, lastSeen); err == nil {
+		t.Fatal("expected a chronologically-older manifest with a non-UTC offset to be rejected as replayed")
+	}
+
+	newer := &manifest.Manifest{ReleasedAt: "2026-09-07T02:00:00+02:00"} // == 2026-09-07T00:00:00Z
+	if err := manifest.CheckNotReplayed(newer, lastSeen); err != nil {
+		t.Errorf("expected a manifest equal in actual time (different offset) to be allowed, got %v", err)
+	}
+}
+
 func TestUnsignedManifestFailsValidation(t *testing.T) {
 	m := &manifest.Manifest{
 		ManifestVersion: 1,
@@ -201,6 +258,38 @@ func TestUnsignedManifestFailsValidation(t *testing.T) {
 	}
 	if err := m.Validate(); err == nil {
 		t.Fatal("expected Validate to reject a manifest with no manifest_signature")
+	}
+}
+
+// TestVerifyWithNilPublicKeyReturnsErrorNotPanic is a regression test for
+// the F07 finding (external security audit): ed25519.Verify panics if the
+// public key isn't exactly ed25519.PublicKeySize bytes, including a nil
+// key -- and cfg.Updates.PublicKeyBase64 is empty by default in
+// install.sh's generated config until an operator sets a real one
+// (agent/cmd/agentd/main.go's parsePublicKey logs a warning on that but
+// still passes the nil key through to Manager.PublicKey). Before this fix,
+// the first real manifest fetch on such an install would panic instead of
+// reporting a clean "not configured" error.
+func TestVerifyWithNilPublicKeyReturnsErrorNotPanic(t *testing.T) {
+	_, priv := testKeypair(t)
+	path, sum := writeTempArtifact(t, "content")
+	m := buildSignedManifest(t, priv, "agent", path, sum)
+
+	var nilKey ed25519.PublicKey
+	if err := manifest.VerifyManifestSignature(m, nilKey); !errors.Is(err, manifest.ErrNoPublicKey) {
+		t.Fatalf("VerifyManifestSignature(nil key) = %v, want ErrNoPublicKey", err)
+	}
+
+	c := m.Components["agent"]
+	if err := manifest.VerifyArtifact(path, c, nilKey); !errors.Is(err, manifest.ErrNoPublicKey) {
+		t.Fatalf("VerifyArtifact(nil key) = %v, want ErrNoPublicKey", err)
+	}
+
+	// A key of the wrong length (truncated/corrupted config, not just
+	// empty) must be refused the same way, not just an exactly-nil key.
+	shortKey := ed25519.PublicKey([]byte{1, 2, 3})
+	if err := manifest.VerifyManifestSignature(m, shortKey); !errors.Is(err, manifest.ErrNoPublicKey) {
+		t.Fatalf("VerifyManifestSignature(short key) = %v, want ErrNoPublicKey", err)
 	}
 }
 

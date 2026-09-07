@@ -21,4 +21,12 @@ var (
 	// ErrNoRollbackTarget means the component's store has no previous
 	// version recorded.
 	ErrNoRollbackTarget = errors.New("updates: no previous version to roll back to")
+	// ErrAlreadyInstalled means the manifest's version for this component
+	// is already the one currently active -- Install returns this early,
+	// before ever calling store.Store.Stage, instead of letting a
+	// same-version "reinstall" reach the store layer at all (which would
+	// otherwise reuse -- and, on a failed extraction, delete -- the live
+	// release directory; see store.ErrAlreadyActive and the F08 fix for an
+	// external security audit's finding).
+	ErrAlreadyInstalled = errors.New("updates: this version is already installed and active")
 )

@@ -60,7 +60,7 @@ sudo bash install.sh
 | `/opt/qrx-node-suite/bin/uninstall.sh` | Uninstaller (see below) |
 | `/etc/qrx-node-suite/agent.json` | Configuration (root + `qrx-agent` readable only) |
 | `/var/lib/qrx-node-suite/` | SQLite database, OTA component store |
-| `/var/log/qrx-node-suite/install.log` | Installer's own log |
+| `/var/log/qrx-node-suite/install.log` | Installer's own log (root-owned; see [Installer log directory](#installer-log-directory)) |
 | `/etc/systemd/system/qrx-agent.service` | systemd unit |
 | `/usr/local/bin/qrx-node-suite` | `status` / `logs` / `uninstall` convenience wrapper |
 
@@ -110,20 +110,52 @@ touches your firewall -- see [Firewall](#firewall).
 
 ## Release security
 
-Every release tarball is checked against a published `SHA256SUMS`. When the release
-also publishes `SHA256SUMS.sig`, `install.sh` verifies that signature (Ed25519, raw
-message) against a public key compiled into the script itself, using nothing but
-`openssl` + coreutils (no extra dependency, no network fetch of the key). This
-mirrors the trust model `agent/updates/manifest` already uses for OTA updates
-(`docs/security.md`): the signing key is never the same credential as GitHub
-publishing access, so a compromised release/publishing account alone cannot make
-`install.sh` accept a tampered release.
+Every GitHub-sourced release tarball must pass two checks, in order: an Ed25519
+signature (raw message) over the release's `SHA256SUMS`, verified against a public
+key compiled into `install.sh` itself, using nothing but `openssl` + coreutils (no
+extra dependency, no network fetch of the key); then the tarball's own SHA256
+checksum against that now-trusted `SHA256SUMS`. **A release with no signature, or
+one that fails verification, is refused outright** -- `install.sh` does not fall
+back to checksum-only trust, because the checksum comes from the same release
+location being verified: without the signature, "no attacker" and "an attacker who
+stripped the signature" are indistinguishable. This mirrors the trust model
+`agent/updates/manifest` already uses for OTA updates (`docs/security.md`): the
+signing key is never the same credential as GitHub publishing access, so a
+compromised release/publishing account alone cannot make `install.sh` accept a
+tampered release.
 
-`.github/workflows/release.yml` signs `SHA256SUMS` with
-`agent/cmd/sign-checksums`, using a private key from the `RELEASE_SIGNING_PRIVATE_KEY`
-repository secret (never committed). If that secret isn't set, the workflow still
-publishes the release but only with `SHA256SUMS` (unsigned); `install.sh` falls
-back to checksum-only verification in that case and says so.
+`.github/workflows/release.yml` signs `SHA256SUMS` with `agent/cmd/sign-checksums`,
+using a private key from the `RELEASE_SIGNING_PRIVATE_KEY` repository secret (never
+committed), and **refuses to publish a release at all if that secret isn't set** --
+an unsigned release would be one `install.sh` can never actually install, so
+publishing it anyway would just be a broken release with a misleading green
+checkmark. Set the secret (see `docs/deployment.md#signing-keys`) before tagging a
+release.
+
+The `QRX_LOCAL_TARBALL` testing/offline-install hook (see
+[Environment variables](#environment-variables)) is a deliberately separate trust
+boundary: it never touches GitHub at all, so there is no release signature to check
+-- the operator supplying a local tarball is trusting it out of band. SHA256
+verification still applies there.
+
+## Installer log directory
+
+`QRX_LOG_DIR` (`/var/log/qrx-node-suite` by default) is owned by `root:qrx-agent`,
+mode `0750` -- **not** writable by the unprivileged `qrx-agent` service user.
+Nothing in this codebase currently has `agentd` itself write into it (it logs to
+stdout/stderr, captured by `journald`); the only thing that writes there is
+`install.sh`'s own `install.log`, written while `install.sh` is running as root.
+Keeping the directory agent-writable would let a compromised `qrx-agent` process
+plant a symlink at `install.log`'s path pointing at any root-owned file; since
+re-running `install.sh` is an expected, documented flow (see
+[Upgrades](#upgrades) below) and its logging setup runs as root before it
+re-secures the directory's ownership, that symlink would later be followed and
+truncated by root -- an unprivileged-to-root arbitrary-file-truncation primitive.
+`install.sh`'s `setup_logging()` additionally refuses to write through anything at
+`install.log`'s path that isn't a plain regular file (removing it first), so even
+a system that was *first* installed by an older, vulnerable `install.sh` -- and so
+still has an agent-owned log directory left over from that earlier run -- is safe
+the moment it's re-run with a patched `install.sh`.
 
 ## Upgrades
 
@@ -158,6 +190,23 @@ and any QRX Core installation are left untouched. Flags:
   yourself, or that predates QRX Node Suite, is never touched by this flag.
 - QRX Core's blockchain data and wallet files are **never** removed by this script,
   under any flag, ever.
+
+### QRX Core removal safety
+
+`--remove-qrx-core`'s marker file lives at
+`/etc/qrx-node-suite/qrx-core-installed-by-this-installer` -- `QRX_CONFIG_DIR`,
+owned `root:qrx-agent` mode `0750`, so only root can write it. Its content becomes
+an `rm -rf` target run as root, so this is deliberate: the marker never lives under
+`/var/lib/qrx-node-suite` (`QRX_DATA_DIR`), which the unprivileged `qrx-agent`
+service user can write to -- a compromised agent process must never be able to
+plant or rewrite this file to point `uninstall.sh` at an arbitrary directory.
+`uninstall.sh` additionally never trusts the marker's content outright: it resolves
+the path (following any symlinks) and refuses to remove anything that doesn't fall
+under `/opt/qrx` (`QRX_CORE_INSTALL_ROOT`), the documented QRX Core install root
+(see `installer/qrx-core-sources.sh`), printing a refusal instead of silently doing
+nothing. This is the fix for an external audit's F05 finding; see
+`installer/test/test-uninstall.sh`'s `resolve_qrx_core_target` tests for the
+regression coverage.
 
 ## Environment variables
 
