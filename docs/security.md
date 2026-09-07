@@ -64,6 +64,87 @@ Expanding on [`SECURITY.md`](../SECURITY.md)'s summary:
    `agent/storage.AuditLogStore`; every `ADMIN_*` action constant is defined
    in `agent/storage/audit_log.go`.
 
+## External audit: confirmed findings not yet fixed
+
+An external security audit of this codebase (16 findings, F01-F16) has been
+worked through in priority order: F01-F05, F07, F08, and F11 are fixed above,
+each with a regression test that fails against the pre-fix code. The
+remaining findings were independently verified against the current source
+(never taken on faith from the report) and are confirmed real, but are
+deferred rather than fixed in the same pass -- each for a reason noted below,
+generally because the correct fix requires a design decision (TLS? a Host
+allowlist? a privilege-escalation mechanism for Core service control?) this
+document should not make unilaterally, or because the finding's blast radius
+is broad enough to deserve its own dedicated review rather than a patch
+appended to an already-large change.
+
+- **F09 -- LAN exposure.** Confirmed: `agent/api` only wraps mutating
+  endpoints in `RequireAdmin` (`server.go`); read endpoints
+  (`/api/v1/status`, `/api/v1/system`, `/api/v1/updates`, ...) are
+  unauthenticated by design, there is no `Host`/`Origin` allowlist anywhere
+  in the HTTP stack, and the admin bearer token travels in cleartext (no TLS
+  termination exists in this codebase at all). `QRX_DASHBOARD_BIND=lan` is
+  opt-in and off by default (`docs/installer.md#dashboard-access`), which
+  bounds but doesn't eliminate the exposure once an operator does turn it
+  on. Deferred: closing this properly means deciding on a security posture
+  (TLS, a Host/Origin allowlist for LAN bind, or authenticating read
+  endpoints too) rather than a narrow bug fix.
+- **F10 -- resource limits.** Confirmed: no request body size limits, no
+  per-request timeouts beyond `http.Server`'s zero-value (no) defaults, no
+  cap on concurrent SSE connections, and `Policy.Locked` (`agent/updates`)
+  is a persisted boolean, not a mutex -- it prevents a *second admin
+  request* from starting a concurrent install, but doesn't serialize
+  concurrent goroutines within this process. Deferred as a general
+  hardening pass rather than one fix.
+- **F12 -- Core service control lacks least privilege.** Confirmed:
+  `agent/platform.New()` returns a `Systemd` service manager with
+  `UseSudo: false` by default, so `qrxd.service` start/stop/restart calls
+  have no privilege-escalation path at all as currently wired:
+  `installer/linux/qrx-agent-sudoers` exists in the repo but neither
+  `install.sh` nor `cmd/agentd/main.go` reference it or `UseSudo`
+  anywhere -- it is a dead, never-installed policy file, so Core service
+  control genuinely cannot work against a real `qrxd.service` owned by a
+  different user today; `QRXCoreUpdateManager`'s `StartCore` callback in `cmd/agentd/main.go`
+  ignores the `dir` argument it's given; no `Probe` is configured, so
+  Core health checks report "no health probe configured" rather than a
+  real liveness signal; `QRXCoreUpdateManager.Update` does not cross-check
+  the caller-supplied profile's target version the way `SwitchVersion`
+  does. Deferred: this is the real "Core/adapter binding" work the audit's
+  closing instructions name as the next priority tier, and is substantial
+  enough (a least-privilege helper design, a real health probe, wiring
+  `dir` through) to warrant its own pass.
+- **F13 -- Mock-mode fallback is silent.** Confirmed: an explicitly-named
+  but nonexistent `-config` path falls back to Mock-mode defaults with no
+  error; `GET /api/v1/version` reports an assumed `qrx_core_version` even
+  with no real node connected; `/health` is pure liveness, not readiness.
+  Deferred: fixing the silent-fallback case cleanly means deciding whether
+  a bad `-config` path should be a hard startup failure (a behavior
+  change worth flagging to operators, not a drive-by patch).
+- **F14 -- re-running `install.sh` doesn't match its own documentation.**
+  Confirmed: `docs/installer.md#upgrades` says re-running `install.sh`
+  "does not re-install or touch your existing configuration/database", but
+  the actual code only *warns* when it detects an existing install
+  (`main()`'s `if [[ -f /etc/systemd/system/qrx-agent.service ]]` check)
+  and then proceeds through `install_release`/`install_systemd_service`
+  regardless, overwriting the binary, dashboard, and systemd unit outside
+  the OTA system's staged/health-checked/rollback-safe path. Deferred:
+  the fix is either making the installer actually stop (matching the
+  docs) or correcting the docs to match the code -- a product decision,
+  not fixed here to avoid changing installer behavior without that
+  decision.
+- **F15 -- npm advisories.** `dashboard/package.json` exists but no
+  lockfile is currently committed, so a reachability assessment (does this
+  project's actual production usage hit the vulnerable code path in each
+  of the 4 advisories the audit named -- a Vite Windows path check, a Vite
+  sourcemap traversal, an esbuild dev-server issue, and a React Router
+  redirect/SSR-hydration issue) needs a committed lockfile to audit
+  against reproducibly. Deferred pending that.
+
+Every fix above was verified against the actual current source before
+being made (never assumed from the audit report's prose), and every
+deferred finding above was independently reproduced or confirmed by
+reading the relevant code, not merely restated from the report.
+
 ## Reporting
 
 See [`SECURITY.md`](../SECURITY.md) for how to report a vulnerability.
