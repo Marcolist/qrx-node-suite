@@ -91,7 +91,11 @@ code (F14, a documentation-vs-code mismatch, is verified by the docs now
 matching the actual behavior rather than a test); F13 is partially fixed
 (see [Hard guarantees](#hard-guarantees-detail) item 7 for what's fixed,
 and below for what's still deferred); F09, F10, and F12 are each
-partially fixed, below, with the same fixed/deferred split noted inline.
+partially fixed, below, with the same fixed/deferred split noted inline;
+F15 has a reachability assessment against each named advisory but still
+no committed lockfile (this sandbox's own network policy blocks npm
+registry access -- see its note below for why a lockfile wasn't
+hand-written as a substitute).
 The
 remaining findings were independently verified against the current source
 (never taken on faith from the report) and are confirmed real, but are
@@ -206,13 +210,63 @@ appended to an already-large change.
   (a second `/ready` endpoint? redefine `/health`'s semantics, breaking
   anything that already polls it as pure liveness?) this document
   shouldn't make unilaterally.
-- **F15 -- npm advisories.** `dashboard/package.json` exists but no
-  lockfile is currently committed, so a reachability assessment (does this
-  project's actual production usage hit the vulnerable code path in each
-  of the 4 advisories the audit named -- a Vite Windows path check, a Vite
-  sourcemap traversal, an esbuild dev-server issue, and a React Router
-  redirect/SSR-hydration issue) needs a committed lockfile to audit
-  against reproducibly. Deferred pending that.
+- **F15 -- npm advisories (reachability assessed; lockfile still
+  blocked).** `dashboard/package.json` still has no committed lockfile --
+  not by choice: this session's sandbox blocks direct access to
+  `registry.npmjs.org` at the network-policy layer (`npm install` and a
+  direct `curl` both get an explicit `403`/`host_not_allowed` from the
+  egress proxy, not a transient failure), so `npm install`/`npm ci` cannot
+  run here at all, and a lockfile was deliberately NOT hand-written (a
+  fabricated lockfile with invented integrity hashes and resolved
+  versions would be actively wrong, not just incomplete -- it could
+  silently misdescribe what `npm ci` actually installs). What follows is
+  a manual reachability assessment against each of the 4 advisories the
+  audit named, matched to public GHSA records by description (no live
+  `npm audit` was run):
+  - **Vite Windows path check** (`server.fs.deny` bypassed via a
+    backslash on Windows, `GHSA-93m4-6634-74q7`): affects Vite
+    `>=5.2.6,<=5.4.20` (fixed in `5.4.21`); `package.json`'s prior
+    `"vite": "^5.4.0"` could have resolved anywhere in that vulnerable
+    range absent a lockfile, so it's now pinned to `^5.4.21` (a one-line
+    fix that doesn't need a lockfile to take effect once one exists). Even
+    unpatched, the advisory's own precondition -- the dev server
+    explicitly exposed to the network via `--host`/`server.host` -- is
+    never met here: `dashboard/vite.config.ts` sets no `server.host`
+    (Vite's own default keeps it loopback-only), and the dev server is
+    never part of any shipped install in any case (`install.sh` ships
+    `vite build`'s static output, served by `cmd/agentd`'s own Go HTTP
+    handler, not a running Vite process).
+  - **Vite sourcemap traversal** (`GHSA-4w7w-66w2-5vf9`, path traversal in
+    optimized-deps `.map` handling): confirmed to affect Vite 6.x/7.x/8.x
+    only, not the 5.x line this project is pinned to at all -- not
+    applicable regardless of exact resolved version.
+  - **esbuild dev-server issue** (`GHSA-67mh-4wv8-2f99`: esbuild's dev
+    server sets `Access-Control-Allow-Origin: *`, letting any website read
+    responses from a developer's local dev server; esbuild `<=0.24.2`,
+    fixed in `0.25.0`; esbuild is a transitive dependency of Vite 5.4.x's
+    dev server, not declared directly): same reasoning as the Vite finding
+    above -- dev-server-only, never network-exposed by this project's own
+    config, never part of a shipped install.
+  - **React Router redirect/SSR-hydration issue** (closest public match:
+    `GHSA-337j-9hxr-rhxg` / CVE-2026-53666, arbitrary constructor
+    injection via `deserializeErrors()` during SSR hydration): affects
+    `react-router` (the v7 unified package) `<=7.18.0`; this project
+    depends on the older, separate `react-router-dom` `^6.26.0` package,
+    a different major line. Moot either way: `dashboard/src/App.tsx` uses
+    `HashRouter` -- pure client-side rendering, no server-side rendering
+    or hydration anywhere in this codebase -- and the advisory's own text
+    says it "does not impact applications using Declarative Mode," which
+    is exactly what this is.
+
+  In short: none of the 4 named advisories reach this project's actual
+  production deployment (a Go binary serving pre-built static files, no
+  Node.js process involved at all once built), and the one that could
+  plausibly affect a developer's local machine (the Vite/esbuild dev-
+  server pair) already fails its own network-exposure precondition here.
+  Generating and committing a real lockfile, and running a real `npm
+  audit` against it, is still worth doing in an environment that can
+  reach the npm registry -- this assessment is a reasoned stand-in, not a
+  replacement for that.
 
 Every fix above was verified against the actual current source before
 being made (never assumed from the audit report's prose), and every
