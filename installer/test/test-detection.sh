@@ -92,8 +92,8 @@ unset MOCK_UNAME_OUTPUT
 echo "== detect_os =="
 FIXTURES="${REPO_ROOT}/installer/test/fixtures"
 
-# QRX_OS_RELEASE_FILE is read by install.sh's detect_os() (sourced above);
-# shellcheck can't see that across the `source` boundary.
+# QRX_OS_RELEASE_FILE is read by install.sh's detect_os() (sourced above) --
+# not visible to static analysis across the `source` boundary.
 # shellcheck disable=SC2034
 QRX_OS_RELEASE_FILE="${FIXTURES}/ubuntu-24.04.os-release"
 detect_os
