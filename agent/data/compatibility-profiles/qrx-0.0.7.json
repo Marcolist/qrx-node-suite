@@ -1,0 +1,44 @@
+{
+  "profile_version": 1,
+  "qrx_core_version": "0.0.7",
+  "known_cli_commands": [
+    "getnodestatus",
+    "getblockchaininfo",
+    "getnetworkinfo",
+    "getuptime",
+    "getbuildinfo",
+    "getmempoolinfo",
+    "getrecentblocks",
+    "getrecenttransactions",
+    "getvalidatorstatus",
+    "getblockproducerinfo",
+    "getfeeinfo",
+    "getwalletinfo",
+    "getnewaddress",
+    "listaddresses",
+    "getaddressnonce",
+    "sendrawtransaction",
+    "getnoncelanes",
+    "getvelocityinfo",
+    "createvelocitytransaction"
+  ],
+  "known_rpc_methods": [],
+  "feature_flags": {
+    "velocity": true,
+    "validator_status": true,
+    "block_producer_info": true,
+    "nonce_lanes": true
+  },
+  "required_adapter": "qrx007",
+  "optional_features": [],
+  "known_bugs": [],
+  "platform_notes": "UNVERIFIED: this profile is transcribed from the QRX 0.0.7 public branch's documented command list (see docs/qrx-0.0.7-interface.md). Exact JSON response field names, error shapes, network/wallet selection flags, and RPC vs. CLI-forwarding transport have not yet been confirmed against QRX 0.0.7 source or a running node. Do not treat known_cli_commands as a guarantee of response schema -- agent/adapters/qrx007 must degrade individual fields to Unavailable rather than assume a shape.",
+  "min_recommended_suite_version": "0.1.0",
+  "core_version_switch_safety": {
+    "blockchain_data": "",
+    "configuration": "",
+    "wallet": "",
+    "adapter": "",
+    "network": ""
+  }
+}

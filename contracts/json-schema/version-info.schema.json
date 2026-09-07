@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qrx-node-suite/contracts/version-info.schema.json",
+  "title": "Version Info",
+  "description": "Mirrors agent/models.VersionInfo -- GET /api/v1/version's response.",
+  "type": "object",
+  "required": [
+    "suite_version", "agent_version", "dashboard_version", "adapter_name", "adapter_version",
+    "qrx_core_version", "api_version", "telemetry_protocol_version", "config_schema_version"
+  ],
+  "properties": {
+    "suite_version": { "type": "string" },
+    "agent_version": { "type": "string" },
+    "dashboard_version": { "type": "string" },
+    "adapter_name": { "type": "string" },
+    "adapter_version": { "type": "string" },
+    "qrx_core_version": { "type": "string" },
+    "api_version": { "type": "string" },
+    "telemetry_protocol_version": { "type": "integer" },
+    "config_schema_version": { "type": "integer" }
+  }
+}

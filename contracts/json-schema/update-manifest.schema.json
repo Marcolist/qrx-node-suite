@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qrx-node-suite/contracts/update-manifest.schema.json",
+  "title": "Update Manifest",
+  "description": "Mirrors agent/updates/manifest.Manifest (docs/updates.md#update-manifest). manifest_signature and every component's signature are required -- an unsigned manifest is never valid.",
+  "type": "object",
+  "required": ["manifest_version", "channel", "suite_version", "released_at", "components", "manifest_signature"],
+  "properties": {
+    "manifest_version": { "type": "integer", "minimum": 1 },
+    "channel": { "type": "string", "enum": ["stable", "beta", "nightly", "development", "manual"] },
+    "suite_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+" },
+    "released_at": { "type": "string", "format": "date-time" },
+    "components": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/componentUpdate" },
+      "minProperties": 1
+    },
+    "manifest_signature": {
+      "type": "string",
+      "description": "base64 Ed25519 signature over the canonical payload (agent/updates/manifest.CanonicalPayload) -- channel, suite_version, released_at, and every component's (name, version, sha256), sorted by name."
+    }
+  },
+  "$defs": {
+    "componentUpdate": {
+      "type": "object",
+      "required": ["version", "url", "sha256", "signature"],
+      "properties": {
+        "version": { "type": "string" },
+        "url": { "type": "string", "format": "uri-reference" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "signature": { "type": "string", "description": "base64 Ed25519 signature over the raw sha256 digest bytes" },
+        "release_notes": { "$ref": "#/$defs/releaseNotes" }
+      }
+    },
+    "releaseNotes": {
+      "type": "object",
+      "properties": {
+        "released_at": { "type": "string" },
+        "changes": { "type": "array", "items": { "type": "string" } },
+        "breaking_changes": { "type": "array", "items": { "type": "string" } },
+        "security_fixes": { "type": "array", "items": { "type": "string" } },
+        "required_qrx_version": { "type": "string", "description": "agent/version.Satisfies range syntax" },
+        "required_adapter_version": { "type": "string" },
+        "min_suite_version": { "type": "string" }
+      }
+    }
+  }
+}

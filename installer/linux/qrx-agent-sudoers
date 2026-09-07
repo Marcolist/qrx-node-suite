@@ -1,0 +1,6 @@
+# Grants the qrx-agent user exactly enough sudo to manage the qrxd service
+# it supervises -- nothing else. Install to /etc/sudoers.d/qrx-agent with
+# mode 0440. Used when agent/platform.Systemd is configured with
+# UseSudo:true (the Agent itself should NOT run as root -- see
+# docs/security.md).
+qrx-agent ALL=(root) NOPASSWD: /usr/bin/systemctl start qrxd.service, /usr/bin/systemctl stop qrxd.service, /usr/bin/systemctl restart qrxd.service, /usr/bin/systemctl is-active qrxd.service

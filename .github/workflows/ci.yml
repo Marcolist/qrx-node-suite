@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  agent:
+    name: Agent (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          # No go.sum exists at all (ADR-001: zero external dependencies),
+          # so there's nothing for setup-go's module cache to key off of.
+          cache: false
+
+      # agent/storage/sqlite is cgo against the system libsqlite3 (ADR-001) --
+      # ubuntu-latest images already have build-essential; libsqlite3-dev is
+      # the one extra package the build needs.
+      - name: Install libsqlite3-dev
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+
+      - name: Build
+        working-directory: agent
+        run: go build ./...
+
+      - name: Vet
+        working-directory: agent
+        run: go vet ./...
+
+      - name: gofmt check
+        working-directory: agent
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Test
+        working-directory: agent
+        run: go test ./... -v
+
+  dashboard:
+    name: Dashboard (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: dashboard/package.json
+
+      # No package-lock.json is committed (this project was bootstrapped in
+      # a sandbox with no npm registry access -- see dashboard/README.md),
+      # so this is the first real build verification of the dashboard.
+      # Once a lockfile exists, switch this to `npm ci`.
+      - name: Install dependencies
+        working-directory: dashboard
+        run: npm install
+
+      - name: Typecheck + build
+        working-directory: dashboard
+        run: npm run build

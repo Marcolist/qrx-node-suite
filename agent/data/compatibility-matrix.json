@@ -1,0 +1,46 @@
+{
+  "matrix_version": 1,
+  "updated_at": "2026-09-07T00:00:00Z",
+  "entries": [
+    {
+      "qrx_core_version": "0.0.6",
+      "adapter_name": "legacy006",
+      "adapter_version_range": "^1.2.0",
+      "dashboard_version_range": ">=0.1.0",
+      "status": "PARTIAL",
+      "notes": "Legacy adapter. No VELOCITY support; block height and mempool polling only."
+    },
+    {
+      "qrx_core_version": "0.0.7",
+      "adapter_name": "qrx007",
+      "adapter_version_range": "^1.0.0",
+      "dashboard_version_range": ">=0.2.0",
+      "status": "SUPPORTED",
+      "notes": "Primary supported combination. VELOCITY metrics available where QRX Core reports them."
+    },
+    {
+      "qrx_core_version": "0.0.7",
+      "adapter_name": "legacy006",
+      "adapter_version_range": "^1.2.0",
+      "dashboard_version_range": ">=0.1.0",
+      "status": "EXPERIMENTAL",
+      "notes": "Legacy adapter can reach 0.0.7's RPC surface for basic fields but has not been validated for validator workloads."
+    },
+    {
+      "qrx_core_version": "0.0.7",
+      "adapter_name": "mock",
+      "adapter_version_range": "*",
+      "dashboard_version_range": ">=0.1.0",
+      "status": "SUPPORTED",
+      "notes": "Mock adapter for development and CI. Never for production validator use -- see SIMULATION MODE indicator requirement."
+    },
+    {
+      "qrx_core_version": "0.0.8",
+      "adapter_name": "UNKNOWN",
+      "adapter_version_range": "*",
+      "dashboard_version_range": "*",
+      "status": "UNSUPPORTED",
+      "notes": "No adapter has been validated against 0.0.8 yet."
+    }
+  ]
+}

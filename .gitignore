@@ -1,0 +1,30 @@
+# Go
+agent/bin/
+*.test
+*.out
+
+# Node / dashboard
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.vite/
+npm-debug.log*
+
+# Runtime state (never commit local install state)
+var/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Secrets
+*.pem
+*.key
+!keys/*.pub.pem.example
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
