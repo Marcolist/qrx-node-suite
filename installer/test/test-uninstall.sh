@@ -108,11 +108,19 @@ echo "== --purge-data --remove-qrx-core --yes together (R04) =="
 test_root="$(mktemp -d)"
 QRX_CONFIG_DIR="${test_root}/etc/qrx-node-suite"
 QRX_DATA_DIR="${test_root}/var/lib/qrx-node-suite"
+# QRX_LOG_DIR, PURGE_DATA, REMOVE_QRX_CORE, and ASSUME_YES below are all
+# read only by functions defined in uninstall.sh (sourced above) --
+# invisible to shellcheck's per-file analysis across that `source`
+# boundary, same as the existing disables elsewhere in this file.
+# shellcheck disable=SC2034
 QRX_LOG_DIR="${test_root}/var/log/qrx-node-suite"
 QRX_CORE_INSTALL_ROOT="${test_root}/opt/qrx"
 QRX_CORE_MARKER="${QRX_CONFIG_DIR}/qrx-core-installed-by-this-installer"
+# shellcheck disable=SC2034
 PURGE_DATA=1
+# shellcheck disable=SC2034
 REMOVE_QRX_CORE=1
+# shellcheck disable=SC2034
 ASSUME_YES=1
 
 core_dir="${QRX_CORE_INSTALL_ROOT}/current"
@@ -146,8 +154,11 @@ else
 fi
 
 rm -rf "$test_root"
+# shellcheck disable=SC2034
 PURGE_DATA=0
+# shellcheck disable=SC2034
 REMOVE_QRX_CORE=0
+# shellcheck disable=SC2034
 ASSUME_YES=0
 
 echo ""
