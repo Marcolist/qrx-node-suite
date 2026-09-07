@@ -143,8 +143,14 @@ jobs:
           docker exec qrx-test qrx-node-suite uninstall --yes
           docker exec qrx-test bash -c '! systemctl list-unit-files | grep -q qrx-agent.service'
 
-      - name: Container logs (on failure)
-        if: failure()
+      - name: Container logs
+        # always(), not failure(): a previous attempt at this step used
+        # failure() and never actually ran (visible in CI logs as a
+        # ~3ms gap straight from the health-check failure to cleanup) for
+        # reasons that weren't obvious from the YAML alone -- always()
+        # is a small amount of harmless noise on a successful run in
+        # exchange for guaranteed diagnostics on a failing one.
+        if: always()
         run: |
           docker logs qrx-test || true
           echo "--- qrx-agent.service status ---"
