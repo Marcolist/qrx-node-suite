@@ -498,6 +498,51 @@ func TestCheckRejectsUnknownComponentBeforeTouchingStore(t *testing.T) {
 	}
 }
 
+// TestBootstrapRegistrationRestoresDowngradeAndReplayProtection is a
+// regression test for the R05 finding (external security re-review of the
+// F07 fix): on a freshly bootstrapped install (nothing ever staged/
+// promoted through the OTA store -- exactly what a system that has never
+// completed one real OTA update looks like), Current() is empty, and
+// manifest.CheckNotDowngrade / manifest.CheckNotReplayed both explicitly
+// treat an empty current-version / empty last-seen-released-at as
+// "nothing recorded yet" and let anything through. This proves that gap
+// two ways: first, confirming the bypass is real with NO bootstrap
+// registration (a manifest offering an OLDER version than what's actually
+// running is accepted, without AllowDowngrade, simply because the store
+// has no baseline to compare against); second, confirming
+// store.Store.BootstrapCurrent -- what cmd/agentd's buildControllers now
+// calls at startup -- closes it (the same install is then correctly
+// rejected).
+func TestBootstrapRegistrationRestoresDowngradeAndReplayProtection(t *testing.T) {
+	t.Run("without bootstrap registration, a downgrade is silently accepted", func(t *testing.T) {
+		ctrl := &fakeController{}
+		env := newTestEnv(t, map[string]components.Controller{"dashboard": ctrl})
+		// No BootstrapCurrent call -- store.Current() is empty, exactly
+		// like a freshly installed system that has never completed an OTA
+		// update. The manifest offers 1.0.0, an OLDER version than
+		// whatever a real install.sh-bootstrapped binary would actually
+		// be running (e.g. 2.0.0) -- without AllowDowngrade.
+		env.registerManifest(t, "stable", map[string]string{"dashboard": "1.0.0"}, time.Now())
+		_, err := env.mgr.Install(context.Background(), "dashboard", updates.InstallOptions{})
+		if err != nil {
+			t.Fatalf("CONFIRMED bypass did not reproduce: expected the downgrade to be silently accepted (no baseline to compare against), got error %v", err)
+		}
+	})
+
+	t.Run("with bootstrap registration, the same downgrade is rejected", func(t *testing.T) {
+		ctrl := &fakeController{}
+		env := newTestEnv(t, map[string]components.Controller{"dashboard": ctrl})
+		if err := store.New(env.baseDir, "dashboard").BootstrapCurrent("2.0.0"); err != nil {
+			t.Fatalf("BootstrapCurrent: %v", err)
+		}
+		env.registerManifest(t, "stable", map[string]string{"dashboard": "1.0.0"}, time.Now())
+		_, err := env.mgr.Install(context.Background(), "dashboard", updates.InstallOptions{})
+		if err == nil {
+			t.Fatal("expected the downgrade to be blocked once a bootstrap baseline is recorded")
+		}
+	})
+}
+
 func sha256Hex(t *testing.T, s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])

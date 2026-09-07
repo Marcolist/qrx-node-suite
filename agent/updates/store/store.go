@@ -32,6 +32,48 @@ func (s *Store) CurrentDir() (string, error) {
 	return s.ReleaseDir(v), nil
 }
 
+// BootstrapCurrent records version as this component's "current" version,
+// WITHOUT staging or promoting anything and WITHOUT requiring
+// ReleaseDir(version) to exist on disk -- for registering an
+// already-running binary (installed by install.sh directly, never through
+// Stage/Promote) as this store's baseline version. A no-op if a current
+// version is already recorded: this must never overwrite real,
+// OTA-tracked state, only fill in a gap for a component nothing has ever
+// promoted through this store.
+//
+// Without this, a freshly bootstrapped install's Current() stays empty
+// until its first-ever OTA update succeeds -- and manifest.CheckNotDowngrade
+// and manifest.CheckNotReplayed both explicitly treat an empty current
+// version / empty last-seen-released-at as "nothing recorded yet, nothing
+// to compare against" and let anything through unconditionally. That means
+// the very first real Install call on a freshly bootstrapped system had
+// BOTH downgrade protection and replay protection silently disabled: an
+// attacker (or a compromised/buggy update source) offering an older,
+// already-patched-away-from version, or replaying a stale-but-validly-
+// signed manifest, would have it accepted with neither protection able to
+// object, simply because nothing had a version to compare it against yet.
+// Fix for the R05 finding (external security re-review): a bootstrap-
+// registration gap in the F07 fix.
+//
+// Deliberately does NOT create ReleaseDir(version) or anything a caller
+// might expect to read from that directory -- callers whose CurrentDir()
+// result is actually read from disk (the F07 dashboard-serving fix, for
+// one) must keep treating a "current version recorded, but its directory
+// has no real content" case as equivalent to "nothing usable is staged
+// here", the same as they already must for any other missing/corrupted
+// release directory.
+func (s *Store) BootstrapCurrent(version string) error {
+	if err := s.validate(); err != nil {
+		return err
+	}
+	if _, ok, err := s.Current(); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
+	return s.writePointerAtomic(pointerCurrent, version)
+}
+
 // Stage creates (or returns, if already present) the release directory for
 // version and marks it "staged" -- present on disk but not yet active. The
 // caller writes the verified artifact's contents into the returned

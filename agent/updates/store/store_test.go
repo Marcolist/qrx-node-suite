@@ -353,3 +353,66 @@ func TestComponentPathTraversalRejected(t *testing.T) {
 		}
 	}
 }
+
+// TestBootstrapCurrentRegistersVersionOnFreshStore is a regression test
+// for the R05 finding (external security re-review of the F07 fix): a
+// freshly bootstrapped install (its binary copied into place by
+// install.sh, never staged/promoted through this store at all) had
+// Current() stay empty forever, until its first-ever OTA update
+// succeeded. BootstrapCurrent is what cmd/agentd now calls at startup to
+// close that gap. This proves it sets Current() on an empty store, and
+// crucially, that it never overwrites a version this store has already
+// recorded through a real Stage/Promote cycle.
+func TestBootstrapCurrentRegistersVersionOnFreshStore(t *testing.T) {
+	base := t.TempDir()
+	s := store.New(base, "agent")
+
+	if _, ok, _ := s.Current(); ok {
+		t.Fatal("expected a fresh store to have no current version yet")
+	}
+	if err := s.BootstrapCurrent("0.1.0"); err != nil {
+		t.Fatalf("BootstrapCurrent: %v", err)
+	}
+	cur, ok, err := s.Current()
+	if err != nil || !ok || cur != "0.1.0" {
+		t.Fatalf("Current() after BootstrapCurrent = %q, %v, %v; want 0.1.0, true, nil", cur, ok, err)
+	}
+
+	// Calling it again with a DIFFERENT version must be a no-op: it must
+	// never overwrite whatever is already recorded, bootstrap or real.
+	if err := s.BootstrapCurrent("9.9.9"); err != nil {
+		t.Fatalf("BootstrapCurrent (second call): %v", err)
+	}
+	if cur, _, _ := s.Current(); cur != "0.1.0" {
+		t.Errorf("Current() after a second BootstrapCurrent call = %q, want unchanged 0.1.0", cur)
+	}
+}
+
+// TestBootstrapCurrentNeverOverwritesRealPromotedVersion proves
+// BootstrapCurrent is safe to call unconditionally at every startup: once
+// a real OTA update has ever promoted a version through this store,
+// BootstrapCurrent must never touch it, no matter what RunningVersion the
+// currently-executing binary happens to report (e.g. a stale ldflags
+// value, or a self-update that promoted but hasn't restarted into yet).
+func TestBootstrapCurrentNeverOverwritesRealPromotedVersion(t *testing.T) {
+	base := t.TempDir()
+	s := store.New(base, "agent")
+
+	dir, err := s.Stage("2.0.0")
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "agentd"), []byte("v2.0.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Promote(); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+
+	if err := s.BootstrapCurrent("0.1.0-dev"); err != nil {
+		t.Fatalf("BootstrapCurrent: %v", err)
+	}
+	if cur, _, _ := s.Current(); cur != "2.0.0" {
+		t.Errorf("Current() after BootstrapCurrent on an already-promoted store = %q, want unchanged 2.0.0", cur)
+	}
+}
