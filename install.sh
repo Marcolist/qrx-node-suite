@@ -477,7 +477,7 @@ install_release() {
   fi
 
   install -d -m 0750 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" "$QRX_DATA_DIR"
-  install -d -m 0755 "$QRX_LOG_DIR"
+  install -d -m 0750 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" "$QRX_LOG_DIR"
 
   chown -R root:root "${QRX_PREFIX}"
   chmod -R a+rX "${QRX_PREFIX}"
@@ -556,7 +556,13 @@ generate_admin_token() {
 
 write_config() {
   local config_file="${QRX_CONFIG_DIR}/agent.json"
-  install -d -m 0750 "$QRX_CONFIG_DIR"
+  # Root-owned but group=qrx-agent, mode 0750: root can still manage the
+  # config directly, and the qrx-agent service can traverse into it (an
+  # 0750 directory owned only by root, with no group grant, blocks even a
+  # readable file inside it from a non-root, non-group user -- caught by
+  # installer-ci.yml's Docker smoke test as a real "permission denied"
+  # reading agent.json).
+  install -d -m 0750 -o root -g "$QRX_SERVICE_USER" "$QRX_CONFIG_DIR"
 
   if [[ -f "$config_file" ]]; then
     info "existing config found at ${config_file} -- leaving it untouched"
