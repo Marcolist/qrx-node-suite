@@ -537,6 +537,64 @@ create_service_user() {
   fi
 }
 
+# bootstrap_agent_ota_store lays the freshly downloaded agentd binary into
+# the OTA store's own on-disk layout (agent/updates/store package:
+# <baseDir>/agent/releases/<version>/agentd, current -> releases/<version>)
+# instead of just copying it straight to ${QRX_PREFIX}/bin/agentd, then
+# makes that fixed path a symlink into the store's "current" pointer.
+#
+# This is what makes a promoted self-update reachable at all. Before this,
+# systemd's ExecStart always exec'd a plain file at ${QRX_PREFIX}/bin/agentd
+# that only this installer ever wrote -- Store.Promote() (agent/updates/
+# store/store.go), which is what a self-update actually calls, only ever
+# atomically flips the "current" symlink *inside* the OTA store; it has no
+# way to touch anything under QRX_PREFIX. A "successful" self-update could
+# verify, stage, and promote a new agent binary correctly and still never
+# run it (the R05 finding, external security re-review). Routing the fixed
+# exec path through a one-time symlink into the store's own "current"
+# pointer means Promote()'s existing atomic rename transitively repoints
+# what ExecStart resolves to, with no per-update install.sh involvement and
+# no systemd sandbox changes needed: only the *inner* "current" symlink
+# inside QRX_DATA_DIR ever changes after this runs once, and QRX_DATA_DIR
+# is already in the unit's ReadWritePaths (see install_systemd_service) --
+# the outer symlink at ${QRX_PREFIX}/bin/agentd itself is never rewritten
+# again after this.
+#
+# Idempotent and never regresses an already-promoted version: if "current"
+# is already set (a previous install.sh run already bootstrapped it, or a
+# real OTA update has since promoted a newer version), the pointer is left
+# alone -- re-running install.sh (e.g. to fix local config) with the same
+# or an older release tarball must never move "current" backwards under a
+# self-update that already happened. This mirrors
+# store.Store.BootstrapCurrent's own no-op-if-already-set contract, the
+# Go-side counterpart of this same rule for the version *pointer* (see its
+# doc comment) -- this function is the counterpart for the *files backing
+# it*, which BootstrapCurrent deliberately never creates on its own.
+bootstrap_agent_ota_store() {
+  local extracted_agentd="$1" version="$2"
+  local store_root="${QRX_DATA_DIR}/components/agent"
+  local release_dir="${store_root}/releases/${version}"
+  local current_ptr="${store_root}/current"
+  local launcher="${QRX_PREFIX}/bin/agentd"
+
+  install -d -m 0750 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" \
+    "$store_root" "${store_root}/releases" "$release_dir"
+  install -m 0755 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" \
+    "$extracted_agentd" "${release_dir}/agentd"
+
+  # -L (a symlink node, whatever it points to) or -f (the plain-text
+  # fallback store.Store itself falls back to where symlinks aren't
+  # available) -- either means a current version is already recorded, same
+  # check as store.Store.Current()'s own os.Readlink-then-fallback.
+  if [[ ! -L "$current_ptr" && ! -f "$current_ptr" ]]; then
+    ln -s "releases/${version}" "$current_ptr"
+    chown -h "${QRX_SERVICE_USER}:${QRX_SERVICE_USER}" "$current_ptr"
+  fi
+
+  install -d -m 0755 "${QRX_PREFIX}/bin"
+  ln -sfn "${store_root}/current/agentd" "$launcher"
+}
+
 install_release() {
   local tarball="${WORKDIR}/${ASSET_NAME}"
   local extract_dir="${WORKDIR}/extracted"
@@ -545,8 +603,8 @@ install_release() {
 
   [[ -f "${extract_dir}/agentd" ]] || die "release package is missing the agentd binary -- this looks like a broken/incomplete release artifact."
 
-  install -d -m 0755 "${QRX_PREFIX}/bin"
-  install -m 0755 "${extract_dir}/agentd" "${QRX_PREFIX}/bin/agentd"
+  install -d -m 0750 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" "$QRX_DATA_DIR"
+  bootstrap_agent_ota_store "${extract_dir}/agentd" "$RELEASE_VERSION"
 
   if [[ -d "${extract_dir}/dashboard" ]]; then
     rm -rf "${QRX_PREFIX}/dashboard"
@@ -556,7 +614,6 @@ install_release() {
     warn "release package has no dashboard/ directory -- the web dashboard will not be available until you install one (see docs/development.md)."
   fi
 
-  install -d -m 0750 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" "$QRX_DATA_DIR"
   # Root-owned, not agent-writable -- unlike QRX_DATA_DIR, nothing in this
   # codebase currently has agentd write into QRX_LOG_DIR (it logs to
   # stdout/stderr, captured by journald); this installer is the only thing
@@ -692,7 +749,7 @@ write_config() {
   "admin_token": "${ADMIN_TOKEN}",
   "telegram": { "enabled": false, "token": "", "chat_id": "" },
   "updates": {
-    "public_key_base64": "",
+    "public_key_base64": "${QRX_TRUSTED_PUBLIC_KEY_B64}",
     "source_kind": "github",
     "github_owner": "${QRX_REPO_OWNER}",
     "github_repo": "${QRX_REPO_NAME}",
