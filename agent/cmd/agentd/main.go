@@ -131,15 +131,31 @@ func run() error {
 	}
 
 	registry := adapters.NewRegistry(matrix)
-	if err := registry.Configure(cfg.Adapter.Name, func(a adapters.Adapter) {
-		if c, ok := a.(interface{ SetConfig(qrx.Config) }); ok {
-			c.SetConfig(qrx.Config{
-				CLIPath: cfg.Adapter.CLIPath, DataDir: cfg.Adapter.DataDir,
-				Network: cfg.Adapter.Network, WalletName: cfg.Adapter.WalletName,
-			})
+	adapterConfig := qrx.Config{
+		CLIPath: cfg.Adapter.CLIPath, DataDir: cfg.Adapter.DataDir,
+		Network: cfg.Adapter.Network, WalletName: cfg.Adapter.WalletName,
+	}
+	// Pre-configure every INSTALLED adapter (adapters.Installed(), not just
+	// cfg.Adapter.Name): when Adapter.Name is empty -- the default,
+	// automatic-selection config install.sh generates -- Configure("", ...)
+	// looks up an adapter literally named "" (which never exists) and
+	// silently does nothing, so the adapter registry.SelectAutomatic later
+	// picks and activates below would activate with its factory's
+	// zero-value defaults instead of the operator's configured
+	// cli_path/network/wallet_name/data_dir -- QRX Core connection settings
+	// the installer went out of its way to detect and write. Configure is
+	// safe to call on every registered adapter here regardless of which
+	// one ends up active: it only touches an unactivated instance
+	// (Configure's own contract is "reconfigure before Activate"). Fix for
+	// an external security audit's F11 finding.
+	for _, name := range adapters.Installed() {
+		if err := registry.Configure(name, func(a adapters.Adapter) {
+			if c, ok := a.(interface{ SetConfig(qrx.Config) }); ok {
+				c.SetConfig(adapterConfig)
+			}
+		}); err != nil {
+			logger.Warn("could not pre-configure adapter connection settings", "adapter", name, "error", err)
 		}
-	}); err != nil && cfg.Adapter.Name != "" {
-		logger.Warn("could not pre-configure adapter connection settings", "adapter", cfg.Adapter.Name, "error", err)
 	}
 
 	qrxCoreVersion := detectQRXCoreVersion(ctx, logger, cfg)
