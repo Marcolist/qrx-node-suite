@@ -101,9 +101,16 @@ select {
 }
 
 .sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
   padding: 0 1.1rem 1rem;
   font-weight: 700;
   letter-spacing: 0.02em;
+}
+.sidebar-brand-mark {
+  border-radius: 6px;
+  flex-shrink: 0;
 }
 .sidebar-brand small {
   display: block;

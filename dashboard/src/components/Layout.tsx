@@ -25,8 +25,11 @@ export function Layout({ children }: { children: ReactNode }) {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="sidebar-brand">
-          QRX Node Suite
-          <small>Run. Monitor. Validate.</small>
+          <img src="/icon-512.png" alt="" width="28" height="28" className="sidebar-brand-mark" />
+          <span>
+            QRX Node Suite
+            <small>Run. Monitor. Validate.</small>
+          </span>
         </div>
         <nav className="sidebar-nav">
           {NAV.map((item) => (

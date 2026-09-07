@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/qrx-node-suite-logo.png" alt="QRX Node Suite" width="220">
+</p>
+
 # QRX Node Suite
 
 **Run. Monitor. Validate.**
