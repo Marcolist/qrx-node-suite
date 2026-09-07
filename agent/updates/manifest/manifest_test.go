@@ -189,6 +189,62 @@ func TestCheckNotReplayedRejectsStaleManifest(t *testing.T) {
 	}
 }
 
+func TestTamperedURLFailsVerification(t *testing.T) {
+	pub, priv := testKeypair(t)
+	path, sum := writeTempArtifact(t, "agent-binary-v0.2.0")
+	m := buildSignedManifest(t, priv, "agent", path, sum)
+
+	// Splice in a different download URL without re-signing -- the
+	// artifact's own checksum/signature still protects its *content*, but
+	// url wasn't covered by the manifest signature before this fix, so a
+	// party serving the manifest could redirect the download (e.g. an
+	// SSRF-style probe of internal infrastructure) while the checksum
+	// field itself stayed untouched.
+	c := m.Components["agent"]
+	c.URL = "http://169.254.169.254/latest/meta-data/"
+	m.Components["agent"] = c
+
+	if err := manifest.VerifyManifestSignature(m, pub); err == nil {
+		t.Fatal("expected VerifyManifestSignature to fail after url tampering, got nil")
+	}
+}
+
+func TestTamperedReleaseNotesFailsVerification(t *testing.T) {
+	pub, priv := testKeypair(t)
+	path, sum := writeTempArtifact(t, "agent-binary-v0.2.0")
+	m := buildSignedManifest(t, priv, "agent", path, sum)
+
+	// Add a release_notes entry without re-signing -- this is exactly the
+	// "malicious update server" move CheckCompatibility is meant to be
+	// immune to (docs/security.md): stripping or adding a compatibility
+	// requirement to steer whether an update looks installable. Before
+	// this fix, release_notes wasn't covered by the manifest signature,
+	// so this tamper would have gone undetected.
+	c := m.Components["agent"]
+	c.ReleaseNotes = &manifest.ReleaseNotes{RequiredQRXVersion: ">=99.0.0"}
+	m.Components["agent"] = c
+	if err := manifest.VerifyManifestSignature(m, pub); err == nil {
+		t.Fatal("expected VerifyManifestSignature to fail after release_notes tampering, got nil")
+	}
+}
+
+func TestCheckNotReplayedComparesActualTimeNotStrings(t *testing.T) {
+	// "2026-09-07T01:00:00+02:00" (== 2026-09-06T23:00:00Z) is
+	// chronologically BEFORE "2026-09-07T00:00:00Z", but sorts as the
+	// larger string -- a naive string comparison would let this replay a
+	// genuinely older manifest.
+	older := &manifest.Manifest{ReleasedAt: "2026-09-07T01:00:00+02:00"}
+	lastSeen := "2026-09-07T00:00:00Z"
+	if err := manifest.CheckNotReplayed(older, lastSeen); err == nil {
+		t.Fatal("expected a chronologically-older manifest with a non-UTC offset to be rejected as replayed")
+	}
+
+	newer := &manifest.Manifest{ReleasedAt: "2026-09-07T02:00:00+02:00"} // == 2026-09-07T00:00:00Z
+	if err := manifest.CheckNotReplayed(newer, lastSeen); err != nil {
+		t.Errorf("expected a manifest equal in actual time (different offset) to be allowed, got %v", err)
+	}
+}
+
 func TestUnsignedManifestFailsValidation(t *testing.T) {
 	m := &manifest.Manifest{
 		ManifestVersion: 1,

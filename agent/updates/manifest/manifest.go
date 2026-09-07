@@ -124,10 +124,20 @@ func (m *Manifest) Validate() error {
 
 // CanonicalPayload builds the deterministic byte sequence the manifest
 // signature is computed over: channel, suite_version, released_at, then
-// every component's (name, version, sha256) sorted by name. Using a fixed
-// field list rather than raw JSON bytes avoids canonical-JSON edge cases
-// (key ordering, whitespace) while still committing to everything that
-// matters for integrity.
+// every component's (name, version, url, sha256, release_notes) sorted by
+// name. Using a fixed field list rather than raw JSON bytes avoids
+// canonical-JSON edge cases (key ordering, whitespace) while still
+// committing to everything that matters for integrity.
+//
+// url and release_notes are covered as of this field list -- an earlier
+// version only covered name/version/sha256, which let anything serving an
+// otherwise-validly-signed manifest (docs/security.md's "malicious update
+// server" threat) silently strip release_notes to defeat breaking-update/
+// compatibility protection (CheckCompatibility), or repoint url at
+// arbitrary infrastructure (a real artifact's own sha256+signature still
+// protects its *content*, but not *where the Agent fetches it from* --
+// relevant for SSRF-style abuse of the downloader). See F02 in the
+// security audit that prompted this fix.
 func CanonicalPayload(m *Manifest) []byte {
 	names := make([]string, 0, len(m.Components))
 	for name := range m.Components {
@@ -140,6 +150,12 @@ func CanonicalPayload(m *Manifest) []byte {
 		buf = append(buf, []byte(s)...)
 		buf = append(buf, 0) // NUL separator: prevents field-boundary ambiguity
 	}
+	writeList := func(items []string) {
+		write(fmt.Sprintf("%d", len(items)))
+		for _, item := range items {
+			write(item)
+		}
+	}
 	write(fmt.Sprintf("%d", m.ManifestVersion))
 	write(m.Channel)
 	write(m.SuiteVersion)
@@ -148,7 +164,21 @@ func CanonicalPayload(m *Manifest) []byte {
 		c := m.Components[name]
 		write(name)
 		write(c.Version)
+		write(c.URL)
 		write(c.SHA256)
+		if c.ReleaseNotes == nil {
+			write("0") // presence marker: distinguishes "no release notes" from an empty-but-present one
+		} else {
+			write("1")
+			rn := c.ReleaseNotes
+			write(rn.ReleasedAt)
+			writeList(rn.Changes)
+			writeList(rn.BreakingChanges)
+			writeList(rn.SecurityFixes)
+			write(rn.RequiredQRXVersion)
+			write(rn.RequiredAdapterVersion)
+			write(rn.MinSuiteVersion)
+		}
 	}
 	return buf
 }
