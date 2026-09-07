@@ -116,7 +116,12 @@ func NewMux(d *Deps) http.Handler {
 
 	mux.HandleFunc("POST /api/v1/services/qrx/restart", RequireAdmin(d.AdminToken, d.handleServiceRestart))
 
-	return mux
+	// Wraps every route above, including /health: a DNS-rebinding attacker
+	// can reach any of them with the right Host header once rebound, so
+	// this check has to cover the whole mux, not just the mutating
+	// RequireAdmin-gated ones. See RequireAllowedHost's doc comment (F09
+	// fix, external security audit).
+	return RequireAllowedHost(mux)
 }
 
 func (d *Deps) handleHealth(w http.ResponseWriter, r *http.Request) {

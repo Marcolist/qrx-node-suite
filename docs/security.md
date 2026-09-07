@@ -98,17 +98,33 @@ document should not make unilaterally, or because the finding's blast radius
 is broad enough to deserve its own dedicated review rather than a patch
 appended to an already-large change.
 
-- **F09 -- LAN exposure.** Confirmed: `agent/api` only wraps mutating
-  endpoints in `RequireAdmin` (`server.go`); read endpoints
-  (`/api/v1/status`, `/api/v1/system`, `/api/v1/updates`, ...) are
-  unauthenticated by design, there is no `Host`/`Origin` allowlist anywhere
-  in the HTTP stack, and the admin bearer token travels in cleartext (no TLS
-  termination exists in this codebase at all). `QRX_DASHBOARD_BIND=lan` is
-  opt-in and off by default (`docs/installer.md#dashboard-access`), which
-  bounds but doesn't eliminate the exposure once an operator does turn it
-  on. Deferred: closing this properly means deciding on a security posture
-  (TLS, a Host/Origin allowlist for LAN bind, or authenticating read
-  endpoints too) rather than a narrow bug fix.
+- **F09 -- LAN exposure (partially fixed).** Confirmed three distinct
+  issues under this finding. **Fixed:** there was no `Host` allowlist
+  anywhere in the HTTP stack, meaning a DNS-rebinding attacker (a public
+  domain whose DNS record is switched to `127.0.0.1` or this machine's LAN
+  address after a browser's initial same-origin check already passed)
+  could reach every unauthenticated read endpoint, and even the
+  `RequireAdmin`-gated ones with a stolen/guessed token, from a page
+  hosted anywhere on the internet, regardless of `QRX_DASHBOARD_BIND`.
+  `RequireAllowedHost` (`agent/api/hostcheck.go`) now wraps the entire mux
+  and rejects any request whose `Host` header doesn't name a loopback or
+  private-network address (RFC 1918 / link-local / `localhost`) --
+  config-free by design, since a fixed allowlist of one detected-at-install
+  IP would go stale the moment DHCP reassigns it. Origin/CORS wasn't
+  separately needed: this server sends no CORS headers at all, so a
+  browser already blocks a cross-origin page from reading any response,
+  and the admin endpoints' required `Authorization` header forces a CORS
+  preflight this server never answers, blocking the write itself too --
+  `Host` was the one gap DNS rebinding could still exploit. **Still
+  deferred:** read endpoints (`/api/v1/status`, `/api/v1/system`,
+  `/api/v1/updates`, ...) remain unauthenticated by design, and the admin
+  bearer token still travels in cleartext (no TLS termination exists in
+  this codebase at all) -- `QRX_DASHBOARD_BIND=lan` is opt-in and off by
+  default (`docs/installer.md#dashboard-access`), which bounds but doesn't
+  eliminate the exposure to anyone already on the same LAN once an
+  operator does turn it on. Closing those two needs deciding on a broader
+  security posture (TLS, or authenticating read endpoints too) rather than
+  a narrow bug fix.
 - **F10 -- resource limits (partially fixed).** Confirmed four distinct
   issues under this finding. **Fixed:** no request body size limits
   (`decodeJSON` now wraps every body in `http.MaxBytesReader`, 64 KiB --
