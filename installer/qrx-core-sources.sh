@@ -22,6 +22,14 @@
 #     tar -xzf "${workdir}/qrxd.tar.gz" -C /opt/qrx/versions/<version>/
 #     ln -sfn /opt/qrx/versions/<version> /opt/qrx/current
 #     QRX_CORE_INSTALLED_CLI_PATH="/opt/qrx/current/bin/qrx-cli"
+#     # Record that THIS installer put QRX Core here, so uninstall.sh's
+#     # --remove-qrx-core can find it later -- write it under
+#     # QRX_CONFIG_DIR (root:qrx-agent, root-only-writable), NEVER
+#     # QRX_DATA_DIR: uninstall.sh trusts this file's content as an
+#     # `rm -rf` target run as root, and QRX_DATA_DIR is writable by the
+#     # unprivileged qrx-agent service user (see the F05 fix in
+#     # installer/linux/uninstall.sh and docs/installer.md#qrx-core-removal-safety).
+#     echo "/opt/qrx/versions/<version>" >"${QRX_CONFIG_DIR}/qrx-core-installed-by-this-installer"
 #     return 0
 #   }
 #

@@ -191,6 +191,23 @@ and any QRX Core installation are left untouched. Flags:
 - QRX Core's blockchain data and wallet files are **never** removed by this script,
   under any flag, ever.
 
+### QRX Core removal safety
+
+`--remove-qrx-core`'s marker file lives at
+`/etc/qrx-node-suite/qrx-core-installed-by-this-installer` -- `QRX_CONFIG_DIR`,
+owned `root:qrx-agent` mode `0750`, so only root can write it. Its content becomes
+an `rm -rf` target run as root, so this is deliberate: the marker never lives under
+`/var/lib/qrx-node-suite` (`QRX_DATA_DIR`), which the unprivileged `qrx-agent`
+service user can write to -- a compromised agent process must never be able to
+plant or rewrite this file to point `uninstall.sh` at an arbitrary directory.
+`uninstall.sh` additionally never trusts the marker's content outright: it resolves
+the path (following any symlinks) and refuses to remove anything that doesn't fall
+under `/opt/qrx` (`QRX_CORE_INSTALL_ROOT`), the documented QRX Core install root
+(see `installer/qrx-core-sources.sh`), printing a refusal instead of silently doing
+nothing. This is the fix for an external audit's F05 finding; see
+`installer/test/test-uninstall.sh`'s `resolve_qrx_core_target` tests for the
+regression coverage.
+
 ## Environment variables
 
 The default command needs none of these -- they're for advanced/scripted use.

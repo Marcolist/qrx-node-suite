@@ -30,13 +30,14 @@ jobs:
           bash -n installer/linux/uninstall.sh
           bash -n installer/qrx-core-sources.sh
           bash -n installer/test/test-detection.sh
+          bash -n installer/test/test-uninstall.sh
           bash -n installer/test/gen-fixtures.sh
       - name: shellcheck
         uses: ludeeus/action-shellcheck@master
         with:
           scandir: '.'
           ignore_paths: dashboard/node_modules
-          additional_files: 'install.sh installer/linux/uninstall.sh installer/qrx-core-sources.sh installer/test/test-detection.sh installer/test/gen-fixtures.sh'
+          additional_files: 'install.sh installer/linux/uninstall.sh installer/qrx-core-sources.sh installer/test/test-detection.sh installer/test/test-uninstall.sh installer/test/gen-fixtures.sh'
 
   unit-tests:
     name: detection unit tests
@@ -55,7 +56,9 @@ jobs:
       - name: Regenerate signature fixtures
         run: bash installer/test/gen-fixtures.sh
       - name: Run unit tests
-        run: bash installer/test/test-detection.sh
+        run: |
+          bash installer/test/test-detection.sh
+          bash installer/test/test-uninstall.sh
 
   docker-smoke-test:
     name: Docker smoke test (${{ matrix.image }})
