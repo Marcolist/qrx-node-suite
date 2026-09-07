@@ -82,7 +82,14 @@ echo "QRX Node Suite Uninstaller"
 echo ""
 
 # --- 1. Software: always removed ---
-if systemctl list-unit-files 2>/dev/null | grep -q '^qrx-agent\.service'; then
+# A direct file check, not `systemctl list-unit-files | grep -q ...`: under
+# `set -o pipefail` (this script has it), grep -q's early exit on the first
+# match SIGPIPEs the still-writing systemctl process, and pipefail then
+# reports the *pipeline* as failed on its non-zero signal exit even though
+# grep itself matched -- silently making this `if` read as false (and thus
+# never actually removing the unit) when the service is present. Caught by
+# installer-ci.yml's Docker smoke test.
+if [[ -f /etc/systemd/system/qrx-agent.service ]]; then
   systemctl stop qrx-agent.service 2>/dev/null || true
   systemctl disable qrx-agent.service 2>/dev/null || true
   rm -f /etc/systemd/system/qrx-agent.service

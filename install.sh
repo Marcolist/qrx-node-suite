@@ -731,7 +731,14 @@ main() {
   # Idempotency: an existing install just gets its own OTA system to
   # handle upgrades rather than this bootstrap script re-doing that work
   # (design brief section 29) -- see docs/installer.md#upgrades.
-  if systemctl list-unit-files 2>/dev/null | grep -q '^qrx-agent\.service'; then
+  # A direct file check, not `systemctl list-unit-files | grep -q ...`:
+  # under `set -o pipefail` (this script has it), grep -q's early exit on
+  # the first match SIGPIPEs the still-writing systemctl process, and
+  # pipefail then reports the *pipeline* as failed on its non-zero signal
+  # exit even though grep itself matched -- silently making this `if`
+  # read as false when the service is actually present. Caught by
+  # installer-ci.yml's Docker smoke test (uninstall.sh had the same bug).
+  if [[ -f /etc/systemd/system/qrx-agent.service ]]; then
     warn "QRX Node Suite already appears to be installed (qrx-agent.service exists)."
     info "Re-running this installer will not touch your existing configuration or database."
     info "To upgrade, use the Dashboard's Settings -> Updates page, or POST /api/v1/updates/install (see docs/updates.md)."
