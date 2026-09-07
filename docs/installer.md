@@ -153,21 +153,34 @@ re-secures the directory's ownership, that symlink would later be followed and
 truncated by root -- an unprivileged-to-root arbitrary-file-truncation primitive.
 `install.sh`'s `setup_logging()` additionally creates `install.log` via
 `init_log_file()`, which never opens or truncates through the existing path at
-all: it writes a fresh file under a private temp name in the same directory,
-then atomically renames it over `install.log`'s path. `rename(2)` replaces
-whatever is at the destination -- symlink, regular file, or nothing -- without
-ever dereferencing it, so this is safe against a symlink already there **and**
-against one planted in a race by a still-running compromised process at any
-point up to the rename (an earlier "check for a symlink, remove it, then
-truncate" version of this fix closed the first case but still had a race
-window between the check and the truncate for the second -- see
-`installer/test/test-detection.sh`'s concurrent-attacker regression test,
-which reproducibly broke that earlier version within single-digit iterations
-and now runs clean). This means even a system that was *first* installed by an
-older, vulnerable `install.sh` -- and so still has an agent-owned log directory
-left over from that earlier run, with `qrx-agent` still actively running and
-able to race this exact window -- is safe the moment it's re-run with a
-patched `install.sh`.
+all: it creates a fresh file under a private, `mktemp`-generated temp name in
+the same directory (so its name is never predictable the way an earlier
+`"$$-$RANDOM"`-based name was), **opens a file descriptor on it first**, and
+only then atomically renames it over `install.log`'s path. `rename(2)`
+replaces whatever is at the destination -- symlink, regular file, or nothing
+-- without ever dereferencing it, so this is safe against a symlink already
+there; opening the descriptor before the rename (not after) means there is no
+window at all, race or otherwise, between "the safe file exists at that path"
+and "this process has an fd bound to its actual inode".
+
+That descriptor (`LOG_FD`) is what makes every *later* `log()` call safe too,
+not just this first write: a file descriptor is bound to the underlying
+inode, not the path, so `log()` writes through it directly rather than
+reopening `install.log` by path each time. Two earlier, narrower versions of
+this fix each closed one gap but left another: a "check for a symlink, remove
+it, then truncate" version closed a pre-existing symlink but had a race window
+between the check and the truncate; the atomic-rename version that replaced it
+closed that race for the *first* write, but every later `log()` call
+throughout the rest of the install still reopened `install.log` by path,
+so a symlink planted at any point *after* that first write -- QRX_LOG_DIR can
+stay agent-writable until `install_release()` re-secures it, much later in
+`main()` -- would have every subsequent append follow it (reproduced: see
+`installer/test/test-detection.sh`'s regression tests, which reproducibly
+broke each earlier version before this fix and now run clean). This means
+even a system that was *first* installed by an older, vulnerable `install.sh`
+-- and so still has an agent-owned log directory left over from that earlier
+run, with `qrx-agent` still actively running for the entire duration of a
+later re-run -- is safe the moment it's re-run with a patched `install.sh`.
 
 ## Upgrades
 

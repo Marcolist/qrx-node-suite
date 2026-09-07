@@ -280,6 +280,55 @@ echo "== init_log_file survives a concurrent symlink-replant race (R02) =="
   rm -rf "$test_root"
 }
 
+echo "== log() writes survive a symlink planted AFTER setup_logging (R02 re-review) =="
+{
+  # Regression test for the R02 re-review's finding: the original R02 fix
+  # (init_log_file's atomic rename) only protected the very FIRST write.
+  # Every later log() call still reopened $LOG_FILE by path
+  # (`>>"$LOG_FILE"`), so a symlink planted at that path at any point
+  # during the rest of the install -- QRX_LOG_DIR can stay agent-writable
+  # until install_release() re-secures it, much later in main() -- would
+  # have every subsequent append follow it. This proves setup_logging()
+  # now holds a file descriptor (LOG_FD) bound to the real log file's
+  # inode, so a symlink planted after setup_logging() has already run
+  # affects neither the victim it points at nor where later log() calls'
+  # content actually goes.
+  test_root="$(mktemp -d)"
+  # shellcheck disable=SC2034
+  QRX_LOG_DIR="${test_root}/log"
+  mkdir -p "$QRX_LOG_DIR"
+
+  setup_logging
+  real_log_file="$LOG_FILE"
+
+  victim="${test_root}/victim-owned-by-someone-else"
+  echo "do not touch me" >"$victim"
+  # Attacker (a still-running compromised agent, in the real scenario)
+  # replaces the log path with a symlink AFTER initialization.
+  ln -sf "$victim" "$real_log_file"
+
+  log "this line must land in the real log file, not the victim"
+
+  assert_eq "victim is still untouched by the later log() call" "do not touch me" "$(cat "$victim")"
+  # The path now resolves to the attacker's symlink, so the real log
+  # content is only reachable through the still-open fd -- read it that
+  # way (Linux-specific /proc/self/fd, fine for this Linux-only
+  # installer) to prove the line was actually written somewhere real, not
+  # just silently dropped (which would also make the victim-untouched
+  # assertion above trivially pass for the wrong reason).
+  real_content="$(cat "/proc/self/fd/${LOG_FD}" 2>/dev/null)"
+  assert_contains "the log line actually landed in the real file (via the fd)" "$real_content" "this line must land in the real log file"
+  if [[ -L "$real_log_file" ]]; then
+    echo "  ok - the path is still the attacker's symlink (log() correctly ignored it and wrote via LOG_FD instead)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL - expected the symlink at LOG_FILE's path to be left alone (log() should write via the held fd, never touch the path)"
+    FAIL=$((FAIL + 1))
+  fi
+
+  rm -rf "$test_root"
+}
+
 echo ""
 echo "${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

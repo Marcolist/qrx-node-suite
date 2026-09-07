@@ -52,6 +52,11 @@ TOTAL_STEPS=8
 STEP_NUM=0
 WORKDIR=""
 LOG_FILE="/tmp/qrx-node-suite-install.log"
+# LOG_FD, once setup_logging() succeeds, holds a file descriptor already
+# open on LOG_FILE's underlying inode -- see init_log_file's doc comment
+# for why every log() call writes through this fd rather than reopening
+# LOG_FILE by path (R02 fix, external security re-review).
+LOG_FD=""
 INSTALL_START_EPOCH=$(date +%s)
 
 # ============================================================
@@ -65,7 +70,27 @@ fi
 SYM_OK=$'\xe2\x9c\x93'   # UTF-8 checkmark
 SYM_FAIL=$'\xe2\x9c\x97' # UTF-8 cross
 
-log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >>"$LOG_FILE" 2>/dev/null || true; }
+# log() writes through the already-open LOG_FD when setup_logging()
+# established one, never by reopening $LOG_FILE's path -- reopening by
+# path on every call is exactly the R02 gap (external security
+# re-review): init_log_file's original fix only protected the very first
+# write, but every later log() call still resolved $LOG_FILE by path
+# again, so a symlink planted at that path at any point during the rest
+# of the run (QRX_LOG_DIR can stay agent-writable until install_release()
+# re-secures it, later in main()) would have every subsequent append
+# follow it. A file descriptor is bound to the underlying inode, not the
+# path, so once LOG_FD is open, nothing that later happens to the path
+# can redirect these writes anywhere else. Falls back to the old
+# path-based append if no fd was ever established (e.g. setup_logging
+# hasn't run yet, or opening it failed) -- best-effort logging must never
+# be why the install itself fails.
+log() {
+  if [[ -n "$LOG_FD" ]]; then
+    echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >&"$LOG_FD" || true
+  else
+    echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >>"$LOG_FILE" 2>/dev/null || true
+  fi
+}
 
 step() {
   STEP_NUM=$((STEP_NUM + 1))
@@ -121,34 +146,55 @@ require_root() {
   fi
 }
 
-# init_log_file (re)creates the regular file at path as an empty, real
-# file -- atomically, so it is immune to a symlink (or anything else)
-# already at that path, and immune to a race where such a symlink appears
-# in between a check and this call. It never opens/truncates through the
-# existing path at all: it creates a fresh file under a private temp name
-# in the SAME directory (so the rename below stays on one filesystem, and
-# is therefore atomic), then renames it over path. rename(2) replaces
-# whatever is at the destination -- symlink, regular file, or nothing --
-# without ever dereferencing it, which is exactly what makes this safe
-# where a plain `: >path` (or a "check -L, rm, then truncate" two-step,
-# which still has a race window between the two steps) is not. Verified
-# with a symlink-at-destination test before relying on this. Same
-# technique agent/updates/store/atomic.go already uses for pointer files.
-# Fix for the F04 finding's remaining TOCTOU gap (R02, external security
-# re-review): QRX_LOG_DIR is root-owned as of this installer version, but
-# a system first installed by an older installer may still have it
-# owned by the unprivileged qrx-agent service user at the moment this
-# runs (install_release, later in main(), is what re-secures it) -- and
-# even once root-owned, /tmp itself (this function's fallback location)
-# is world-writable with a predictable filename, an unrelated but
-# equally real symlink-attack surface this same fix closes.
+# init_log_file creates a fresh, empty regular file at path and opens a
+# file descriptor on it, exposed via the global LOG_FD -- both steps
+# happen on a private temp name (created exclusively via mktemp, so its
+# name is never predictable/guessable the way a "$$-$RANDOM"-based name
+# would be, closing a second, narrower gap the R02 re-review also flagged)
+# BEFORE that content is ever visible at the public `path` at all: the fd
+# is opened on the temp file first, and only then is the temp file
+# renamed into place. rename(2) replaces whatever is at the destination
+# -- symlink, regular file, or nothing -- without ever dereferencing it,
+# so this is safe against a symlink already at `path`; opening the fd
+# before the rename, rather than after, means there is no window at all
+# (not even a race window, unlike a create-then-open-by-path two-step)
+# where a file exists at that path but this process hasn't already bound
+# an fd to its actual inode.
+#
+# LOG_FD is the whole point: it is what makes every LATER log() call safe
+# too, not just this first write. A file descriptor is bound to the
+# underlying inode, not the path, so once it's open, nothing that later
+# happens to `path` -- including a symlink planted there at any point for
+# the rest of this script's run -- can redirect subsequent writes anywhere
+# else. An earlier version of this fix (the original F04/R02 fix) only
+# protected this first-write moment; every later log() call still
+# reopened $LOG_FILE by path each time, which the R02 re-review confirmed
+# was still exploitable (reproduced: a symlink planted after this first
+# write, before a later log() call, causes that call's content to land in
+# the symlink's target instead). Fix for that finding.
+#
+# QRX_LOG_DIR is root-owned as of this installer version, but a system
+# first installed by an older installer may still have it owned by the
+# unprivileged qrx-agent service user at the moment this runs
+# (install_release, later in main(), is what re-secures it) -- and even
+# once root-owned, /tmp itself (this function's fallback location) is
+# world-writable, an unrelated but equally real symlink-attack surface
+# this same fix closes.
 init_log_file() {
-  local path="$1" dir tmp
+  local path="$1" dir tmp fd
   dir="$(dirname "$path")"
   [[ -d "$dir" ]] || return 1
-  tmp="${path}.tmp-$$-${RANDOM}${RANDOM}"
-  (umask 022 && : >"$tmp") 2>/dev/null || return 1
-  mv -f "$tmp" "$path" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  tmp="$(mktemp "${dir}/.qrx-install-log.XXXXXX" 2>/dev/null)" || return 1
+  if ! exec {fd}>"$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  fi
+  if ! mv -f "$tmp" "$path" 2>/dev/null; then
+    eval "exec ${fd}>&-" 2>/dev/null
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  fi
+  LOG_FD="$fd"
 }
 
 setup_logging() {
