@@ -51,14 +51,13 @@ func (m *Manager) PendingSelfUpdates(ctx context.Context, componentNames []strin
 // the pending marker, prunes old versions) or ROLLBACKs (reverts the
 // store's current/previous pointers).
 //
-// IMPORTANT, known limitation: if the new binary crashes before this runs
-// at all (rather than starting and failing HealthCheck), there is currently
-// no crash-loop watchdog here -- a process supervisor configured with
-// Restart=always will keep restarting the crashing binary indefinitely.
-// ResumeSelfUpdate only protects against "starts, but is unhealthy," not
-// "doesn't start." A future improvement is a boot-attempt counter that
-// forces an automatic rollback after N consecutive failed starts within a
-// window; see docs/updates.md's note on this.
+// Reaching this function at all proves the new binary started far enough
+// to run it, so it also clears any boot-attempt count BootGuard accumulated
+// on earlier restarts (see bootguard.go) -- BootGuard is what protects
+// against the complementary case, a new binary that crashes before ever
+// getting this far: cmd/agentd calls it, before adapter selection, on every
+// startup, and forces a rollback itself after too many consecutive failed
+// boots.
 //
 // A rollback here does NOT itself restart the process: it only flips the
 // store's pointers back. The caller (cmd/agentd) is responsible for exiting
@@ -73,6 +72,7 @@ func (m *Manager) ResumeSelfUpdate(ctx context.Context, component string) (*stor
 	if err != nil {
 		return nil, err
 	}
+	clearBootAttempts(ctx, m.Settings, component)
 
 	ctrl, ok := m.Controllers[component]
 	if !ok {

@@ -130,13 +130,34 @@ the restarted process calls `Manager.ResumeSelfUpdate`, which runs the real
 health check now that the new code is actually running, then commits or
 rolls back the store pointers.
 
-**Known limitation**: if the new binary crashes before `ResumeSelfUpdate`
-ever runs (rather than starting and failing its health check), there is no
-crash-loop watchdog yet -- a supervisor configured with `Restart=always`
-will keep restarting the crashing binary. `ResumeSelfUpdate` only protects
-against "starts, but unhealthy," not "never starts at all." A future
-improvement is a boot-attempt counter that forces an automatic rollback
-after N consecutive failed starts within a window.
+**Crash-loop guard**: `ResumeSelfUpdate` alone only protects against "starts,
+but unhealthy" -- it can't run at all if the new binary crashes before it
+gets that far, which would otherwise leave a supervisor configured with
+`Restart=always` retrying the crashing binary forever. `cmd/agentd` closes
+this gap with `updates.BootGuard`, which runs as the very first thing on
+every process start, before adapter selection or anything else that could
+itself crash:
+
+1. `BootGuard.PendingComponents` scans for any `agent`/`adapter_*` still
+   carrying a pending self-update marker (set by `Install`, normally cleared
+   by `ResumeSelfUpdate`) -- i.e. components whose most recent self-update
+   hasn't been confirmed healthy yet.
+2. For each one, `BootGuard.CheckAndRecordAttempt` increments a persisted
+   boot-attempt counter, capped at `config.UpdatesConfig.MaxBootAttempts`
+   (default 3, wired into `BootGuard.MaxAttempts`). Within budget, startup
+   continues normally -- if this boot is the one that
+   reaches `ResumeSelfUpdate`, that clears the counter, since reaching it at
+   all proves the crash loop is over regardless of the health check's own
+   outcome.
+3. Once the counter exceeds `MaxBootAttempts`, BootGuard forces the same
+   rollback `ResumeSelfUpdate` would have performed on an unhealthy new
+   version -- reverting the component store's `current`/`previous`
+   pointers, recording a `rolled_back` update-history entry and an audit
+   event, and clearing both the pending marker and the counter -- then
+   `cmd/agentd` exits immediately so the supervisor's next restart runs the
+   reverted, previously-healthy binary.
+
+See `agent/updates/bootguard.go`.
 
 ### Dashboard and compatibility profiles
 

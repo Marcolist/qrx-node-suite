@@ -20,7 +20,8 @@
     "source_kind": "github",
     "github_owner": "your-org",
     "github_repo": "qrx-node-suite",
-    "retain_versions": 2
+    "retain_versions": 2,
+    "max_boot_attempts": 3
   },
   "poll": {
     "node_status_seconds": 5,

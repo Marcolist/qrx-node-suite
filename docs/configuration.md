@@ -28,7 +28,8 @@ authoritative field list. Configuration is itself versioned
     "source_kind": "github",
     "github_owner": "your-org",
     "github_repo": "qrx-node-suite",
-    "retain_versions": 2
+    "retain_versions": 2,
+    "max_boot_attempts": 3
   },
   "poll": { "node_status_seconds": 5, "network_seconds": 10, "system_seconds": 5, "version_hours": 6 },
   "is_validator_node": false,
@@ -49,6 +50,10 @@ authoritative field list. Configuration is itself versioned
 - `is_validator_node: true` hard-disables automatic QRX Core updates
   regardless of any channel setting -- see
   `docs/updates.md#qrx-core-updates`.
+- `updates.max_boot_attempts` bounds how many consecutive failed boots a
+  self-binary update (`agent`, `adapter_*`) gets before `updates.BootGuard`
+  forces an automatic rollback -- see
+  `docs/updates.md#self-binary-components-agent-adapters`.
 
 ## Polling
 

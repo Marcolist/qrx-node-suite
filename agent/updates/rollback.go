@@ -87,12 +87,19 @@ func (m *Manager) auditRollback(ctx context.Context, actor, component string) {
 	if m.Audit == nil {
 		return
 	}
-	action := storage.ActionRollbackAdapter
+	m.Audit.Record(ctx, storage.AuditEvent{Actor: actor, Action: auditActionForRollback(component), Component: component})
+}
+
+// auditActionForRollback picks the ADMIN_ROLLBACK_* audit action for a
+// component name. Shared by Manager.auditRollback (operator-initiated) and
+// BootGuard (crash-loop-forced).
+func auditActionForRollback(component string) string {
 	switch component {
 	case "agent":
-		action = storage.ActionRollbackAgent
+		return storage.ActionRollbackAgent
 	case "dashboard":
-		action = storage.ActionRollbackDashboard
+		return storage.ActionRollbackDashboard
+	default:
+		return storage.ActionRollbackAdapter
 	}
-	m.Audit.Record(ctx, storage.AuditEvent{Actor: actor, Action: action, Component: component})
 }

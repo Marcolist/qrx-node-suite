@@ -72,6 +72,9 @@ func run() error {
 	slog.SetDefault(logger)
 	logger.Info("starting qrx-agentd", "suite_version", suiteVersion, "agent_version", agentVersion, "adapter", cfg.Adapter.Name)
 
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
@@ -89,13 +92,36 @@ func run() error {
 	alertStore := storage.NewAlertStore(db)
 	policy := updates.NewPolicy(settingsStore)
 
+	// BootGuard closes the crash-loop gap in the self-binary update flow
+	// (docs/updates.md#self-binary-components): if a self-update leaves the
+	// process unable to even start (rather than starting and failing its
+	// health check), a supervisor with Restart=always would otherwise retry
+	// forever. Must run before anything below that could itself crash --
+	// adapter selection in particular.
+	bootGuard := &updates.BootGuard{
+		Settings: settingsStore, History: historyStore, Audit: auditStore,
+		BaseDir: componentsBaseDir, MaxAttempts: cfg.Updates.MaxBootAttempts,
+	}
+	pendingBoot, err := bootGuard.PendingComponents(ctx)
+	if err != nil {
+		return fmt.Errorf("check pending self-updates for crash-loop guard: %w", err)
+	}
+	for _, component := range pendingBoot {
+		rolledBack, attempts, err := bootGuard.CheckAndRecordAttempt(ctx, component)
+		if err != nil {
+			logger.Error("boot guard: crash-loop check failed", "component", component, "error", err)
+			continue
+		}
+		if rolledBack {
+			return fmt.Errorf("boot guard: %s crash-looped for %d consecutive boots and was rolled back to its previous version -- exiting so the process supervisor restarts onto it", component, attempts)
+		}
+		logger.Warn("boot guard: recorded a boot attempt for a pending self-update", "component", component, "attempt", attempts, "max_attempts", bootGuard.EffectiveMaxAttempts())
+	}
+
 	matrix, err := data.LoadMatrix()
 	if err != nil {
 		return fmt.Errorf("load compatibility matrix: %w", err)
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	registry := adapters.NewRegistry(matrix)
 	if err := registry.Configure(cfg.Adapter.Name, func(a adapters.Adapter) {

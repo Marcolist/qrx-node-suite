@@ -81,6 +81,14 @@ type UpdatesConfig struct {
 	StaticURLTemplate         string `json:"static_url_template"`
 	LocalManifestPathTemplate string `json:"local_manifest_path_template"`
 	RetainVersions            int    `json:"retain_versions"`
+
+	// MaxBootAttempts is how many consecutive times a self-binary update
+	// (agent, adapter_*) is allowed to fail to boot far enough to reach
+	// Manager.ResumeSelfUpdate before updates.BootGuard forces an
+	// automatic rollback to the previous version. <=0 means BootGuard's
+	// own default (3). See docs/updates.md's "self-binary components"
+	// section.
+	MaxBootAttempts int `json:"max_boot_attempts"`
 }
 
 type PollConfig struct {
@@ -101,8 +109,9 @@ func Default() Config {
 		DashboardDir:  "./dashboard/dist",
 		Adapter:       AdapterConfig{Name: "mock", AssumedQRXCoreVersion: "0.0.7"},
 		Updates: UpdatesConfig{
-			SourceKind:     "development",
-			RetainVersions: 2,
+			SourceKind:      "development",
+			RetainVersions:  2,
+			MaxBootAttempts: 3,
 		},
 		Poll: PollConfig{
 			NodeStatusSeconds: 5,
