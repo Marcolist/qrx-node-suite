@@ -11,16 +11,8 @@ npm run build     # writes dist/ -- point the Agent's dashboard_dir at it
 
 ## Status
 
-This source tree was written in a sandboxed environment with no network
-access to the npm registry, so `npm install`/`npm run build`/`tsc` have
-**not** been run against it here — there is no `package-lock.json` and no
-build verification. The code follows the same patterns throughout (typed
-API client in `src/api/`, a shared `Value<T>` renderer in
-`src/components/ValueDisplay.tsx` mirroring `agent/models`' availability
-states, polling via `src/hooks/usePolling.ts`, live events via
-`src/hooks/useEvents.ts`) and was written carefully, but treat a real
-`npm install && npm run build` as the first verification step before
-relying on it, and fix forward from whatever TypeScript actually reports.
+`package-lock.json` is committed. CI installs with `npm ci`, runs a full
+`npm audit`, typechecks the application, and builds the production assets.
 
 ## Structure
 
@@ -44,8 +36,8 @@ src/
 - **Never fake unknown data**: every field from `agent/models.Value[T]`
   renders through `ValueDisplay`, which shows `unavailable`/`not exposed by
   this QRX Core`/`error` distinctly rather than a blank or a zero.
-- **Admin actions**: the Settings → General tab stores an admin bearer
-  token in `localStorage` (never sent anywhere but this Agent, never
-  persisted server-side beyond the Agent's own `admin_token` config); every
+- **Admin actions**: the Settings → General tab verifies an admin bearer
+  token before accepting it, keeps it in per-tab `sessionStorage`, and sends
+  it only to protected administrative endpoints; every
   write action in Settings → Updates goes through it and surfaces a clear
   error (not a silent no-op) when it's missing or wrong.

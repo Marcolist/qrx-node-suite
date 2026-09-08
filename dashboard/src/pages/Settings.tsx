@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { getAdminToken, setAdminToken } from '../api/client';
+import { api, getAdminToken, setAdminToken } from '../api/client';
 import { Card } from '../components/Card';
 import { SettingsUpdatesTab } from './SettingsUpdates';
 
@@ -24,8 +24,10 @@ export function SettingsPage() {
 }
 
 function GeneralTab() {
-  const [token, setToken] = useState(getAdminToken());
-  const [saved, setSaved] = useState(false);
+  const [token, setToken] = useState('');
+  const [saved, setSaved] = useState(() => getAdminToken() !== '');
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState('');
 
   return (
     <div>
@@ -33,9 +35,8 @@ function GeneralTab() {
       <Card title="Admin session">
         <p className="muted" style={{ marginTop: 0 }}>
           Administrative actions (installing/rolling back updates, switching adapters, restarting services) require
-          the Agent's admin token. It is stored only in this browser's local storage and sent as a bearer token --
-          never persisted on the Agent itself beyond its own config. Leave blank to disable admin actions from this
-          browser.
+          the Agent's admin token. It is checked before login, kept only for this browser tab's session, and sent
+          only with administrative requests. Use admin access only over a trusted LAN, VPN, SSH tunnel, or HTTPS.
         </p>
         <div className="row">
           <input
@@ -45,19 +46,49 @@ function GeneralTab() {
             onChange={(e) => {
               setToken(e.target.value);
               setSaved(false);
+              setError('');
             }}
             style={{ minWidth: 280 }}
           />
           <button
             className="primary"
-            onClick={() => {
-              setAdminToken(token);
-              setSaved(true);
+            disabled={checking}
+            onClick={async () => {
+              setSaved(false);
+              setError('');
+              if (!token) {
+                setAdminToken('');
+                setError('Enter the admin token.');
+                return;
+              }
+              setChecking(true);
+              try {
+                await api.verifyAdmin(token);
+                setAdminToken(token);
+                setToken('');
+                setSaved(true);
+              } catch (err) {
+                setAdminToken('');
+                setError(err instanceof Error ? err.message : 'Login failed.');
+              } finally {
+                setChecking(false);
+              }
             }}
           >
-            Save
+            {checking ? 'Checking…' : 'Log in'}
           </button>
-          {saved ? <span className="muted">Saved.</span> : null}
+          <button
+            onClick={() => {
+              setAdminToken('');
+              setToken('');
+              setSaved(false);
+              setError('');
+            }}
+          >
+            Log out
+          </button>
+          {saved ? <span className="muted">Authenticated for this tab.</span> : null}
+          {error ? <span>{error}</span> : null}
         </div>
       </Card>
     </div>

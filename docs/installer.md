@@ -104,12 +104,17 @@ file). Until then it defines nothing, and `install.sh` treats that the same as
 ## Admin token
 
 `install.sh` generates a random 40-character admin token and writes it into
-`admin_token` in `agent.json` (mode 0640, owned by `qrx-agent`) -- this is the same
+`admin_token` in `agent.json` (mode 0640, owned by `root:qrx-agent`) -- this is the same
 static bearer token `agent/api`'s existing admin-auth middleware has always used
 (`docs/security.md`), not a new mechanism. It is printed once, at the end of
 installation, and never written to the installer's own log file. Treat it like any
 other credential: if you lose it, generate a new one and update `agent.json`
 yourself (there is currently no in-Dashboard token rotation flow).
+
+The dashboard checks the token before reporting a successful login, keeps it in
+the current tab's `sessionStorage` only, and sends it only with administrative
+requests. Closing the tab clears the browser-side session; “Log out” clears it
+immediately.
 
 ## Dashboard access
 
@@ -126,6 +131,12 @@ isn't a loopback or private-network address (defense against DNS
 rebinding -- see `docs/security.md`'s F09 note), which does not include a
 custom DNS name or `.local`/mDNS hostname you may have pointed at this
 machine yourself.
+
+On a home server, plain HTTP is suitable only on a trusted private LAN. On a
+VPS, keep the default loopback binding and reach it through an SSH tunnel or a
+private VPN, or put a TLS reverse proxy in front of it. Never submit the admin
+token over a public plain-HTTP connection: bearer tokens provide authorization,
+not transport encryption.
 
 ## Release security
 
@@ -220,9 +231,12 @@ continues:
   already exists there.
 - The freshly downloaded release's `agentd` binary, and its
   `dashboard/` assets, ARE (re-)installed: the agent binary is added to the
-  OTA store as a new release (`bootstrap_agent_ota_store()`, harmless and
-  additive -- it never moves the store's `current` pointer backward if a
-  real self-update has since promoted something newer) and
+  OTA store as a new release. `bootstrap_agent_ota_store()` advances the
+  active pointer when this release is newer, preserves the former release
+  for rollback, and never moves the pointer backward if OTA has already
+  promoted something newer. Operations inside the agent-owned OTA store run
+  as the unprivileged service account so a compromised agent cannot turn a
+  root-run reinstall into a privileged symlink write. The directory
   `/opt/qrx-node-suite/dashboard` is replaced outright with whatever the
   re-run downloaded. If a dashboard OTA update has ever been promoted
   through the store, this has no visible effect (`cmd/agentd`'s handler

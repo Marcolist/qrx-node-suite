@@ -100,6 +100,7 @@ func NewMux(d *Deps) http.Handler {
 	mux.HandleFunc("GET /api/v1/activity", d.handleActivity)
 	mux.HandleFunc("GET /api/v1/services", d.handleServices)
 	mux.HandleFunc("GET /api/v1/settings", d.handleSettingsGet)
+	mux.HandleFunc("GET /api/v1/admin/session", RequireAdmin(d.AdminToken, d.handleAdminSession))
 
 	mux.HandleFunc("GET /api/v1/alerts", d.handleAlertsList)
 
@@ -122,6 +123,10 @@ func NewMux(d *Deps) http.Handler {
 	// RequireAdmin-gated ones. See RequireAllowedHost's doc comment (F09
 	// fix, external security audit).
 	return RequireAllowedHost(mux)
+}
+
+func (d *Deps) handleAdminSession(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
 }
 
 func (d *Deps) handleHealth(w http.ResponseWriter, r *http.Request) {

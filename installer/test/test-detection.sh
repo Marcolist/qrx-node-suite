@@ -124,6 +124,17 @@ hex_actual="$(od -An -tx1 "$hex_out" | tr -d ' \n')"
 assert_eq "hex_to_bin preserves 0x00 byte" "0a00ff" "$hex_actual"
 rm -f "$hex_out"
 
+echo "== generate_admin_token =="
+generate_admin_token
+assert_eq "admin token has a stable 40-character length" "40" "${#ADMIN_TOKEN}"
+if [[ "$ADMIN_TOKEN" =~ ^[A-Za-z0-9_-]{40}$ ]]; then
+  echo "  ok - admin token uses the base64url alphabet"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL - admin token contains characters outside the base64url alphabet"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "== verify_signature (real keypair round-trip) =="
 SIG_FIXTURES="${REPO_ROOT}/installer/test/fixtures/sig"
 if [[ -d "$SIG_FIXTURES" ]]; then
@@ -326,6 +337,38 @@ echo "== log() writes survive a symlink planted AFTER setup_logging (R02 re-revi
     FAIL=$((FAIL + 1))
   fi
 
+  rm -rf "$test_root"
+}
+
+echo "== init_log_file does not permanently redirect stderr =="
+{
+  test_root="$(mktemp -d)"
+  init_log_file "${test_root}/install.log"
+  stderr_probe="$({ echo "stderr remains visible" >&2; } 2>&1)"
+  assert_eq "stderr still reaches its caller after init_log_file" "stderr remains visible" "$stderr_probe"
+  rm -rf "$test_root"
+}
+
+echo "== subprocess diagnostics use the held log descriptor =="
+{
+  test_root="$(mktemp -d)"
+  # shellcheck disable=SC2034
+  QRX_LOG_DIR="${test_root}/log"
+  mkdir -p "$QRX_LOG_DIR"
+  setup_logging
+  real_log_file="$LOG_FILE"
+  victim="${test_root}/victim"
+  echo "do not touch me" >"$victim"
+  ln -sf "$victim" "$real_log_file"
+
+  # shellcheck disable=SC2329
+  curl() { echo "mock curl diagnostic" >&2; return 0; }
+  check_connectivity curl
+  unset -f curl
+
+  assert_eq "subprocess did not follow a replaced log path" "do not touch me" "$(cat "$victim")"
+  real_content="$(cat "/proc/self/fd/${LOG_FD}" 2>/dev/null)"
+  assert_contains "subprocess diagnostic landed via LOG_FD" "$real_content" "mock curl diagnostic"
   rm -rf "$test_root"
 }
 

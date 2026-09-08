@@ -31,7 +31,10 @@ RestartSec=2
 
 # Sandboxing -- narrow but not so narrow it can't manage qrxd or its own
 # data. Adjust ReadWritePaths if your qrxd datadir lives elsewhere.
-NoNewPrivileges=true
+# qrx-agent uses the command-exact /etc/sudoers.d/qrx-agent rule to manage
+# qrxd.service. NoNewPrivileges=true would block sudo's setuid transition
+# before that narrow policy can be evaluated.
+NoNewPrivileges=false
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/qrx-node-suite/var /etc/qrx-node-suite

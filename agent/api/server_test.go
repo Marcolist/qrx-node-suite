@@ -157,6 +157,37 @@ func TestAdminEndpointRejectsMissingOrWrongToken(t *testing.T) {
 	}
 }
 
+func TestAdminSessionVerifiesTokenWithoutPerformingAnAction(t *testing.T) {
+	deps := newTestDeps(t, "s3cr3t")
+	mux := api.NewMux(deps)
+
+	for _, tc := range []struct {
+		name   string
+		token  string
+		status int
+	}{
+		{name: "missing", status: http.StatusUnauthorized},
+		{name: "wrong", token: "wrong-token", status: http.StatusUnauthorized},
+		{name: "valid", token: "s3cr3t", status: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/session", nil)
+			req.Host = "127.0.0.1:8787"
+			if tc.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.status, rec.Body.String())
+			}
+			if tc.status == http.StatusOK && !strings.Contains(rec.Body.String(), `"authenticated":true`) {
+				t.Fatalf("valid-session response = %s", rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestActivateVersionRequiresAdminAndActivatesAdapter(t *testing.T) {
 	deps := newTestDeps(t, "s3cr3t")
 	srv := httptest.NewServer(api.NewMux(deps))

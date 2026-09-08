@@ -65,6 +65,14 @@ paths:
       responses: { '200': { description: OK } }
   /api/v1/services: { get: { summary: OS service status (qrxd), responses: { '200': { description: OK } } } }
   /api/v1/settings: { get: { summary: Raw operator settings key/value dump, responses: { '200': { description: OK } } } }
+  /api/v1/admin/session:
+    get:
+      summary: Verify the configured admin bearer token without performing an action
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Token is valid }
+        '401': { description: Token missing or invalid }
+        '403': { description: Administrative endpoints are disabled }
 
   /api/v1/events:
     get:

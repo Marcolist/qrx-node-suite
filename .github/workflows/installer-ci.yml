@@ -147,6 +147,20 @@ jobs:
           docker exec qrx-test systemctl is-active qrx-agent.service
           docker exec qrx-test curl -fsS http://127.0.0.1:8787/health
           docker exec qrx-test systemctl is-enabled qrx-agent.service
+          test "$(docker exec qrx-test stat -c '%a %U:%G' /etc/qrx-node-suite/agent.json)" = "640 root:qrx-agent"
+          docker exec qrx-test su -s /bin/sh qrx-agent -c 'test ! -w /etc/qrx-node-suite/agent.json'
+
+      - name: Verify dashboard host protection, security headers, and admin login
+        run: |
+          headers="$(docker exec qrx-test curl -sS -D - -o /dev/null http://127.0.0.1:8787/)"
+          echo "$headers" | grep -qi '^Content-Security-Policy:'
+          echo "$headers" | grep -qi '^X-Frame-Options: DENY'
+          status="$(docker exec qrx-test curl -sS -o /dev/null -w '%{http_code}' -H 'Host: attacker.example' http://127.0.0.1:8787/)"
+          test "$status" = "403"
+          admin_token="$(docker exec qrx-test jq -r .admin_token /etc/qrx-node-suite/agent.json)"
+          test "$(docker exec qrx-test curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/api/v1/admin/session)" = "401"
+          test "$(docker exec qrx-test curl -sS -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong' http://127.0.0.1:8787/api/v1/admin/session)" = "401"
+          test "$(docker exec qrx-test curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${admin_token}" http://127.0.0.1:8787/api/v1/admin/session)" = "200"
 
       # F12 (external security audit): confirms install.sh actually
       # installed the qrxd.service sudoers rule (a real system file,
@@ -162,6 +176,9 @@ jobs:
           grep -q 'systemctl stop qrxd.service' sudoers-list.txt
           grep -q 'systemctl restart qrxd.service' sudoers-list.txt
           grep -q 'systemctl is-active qrxd.service' sudoers-list.txt
+          test "$(docker exec qrx-test systemctl show qrx-agent.service -p NoNewPrivileges --value)" = "no"
+          sudo_result="$(docker exec -u qrx-agent qrx-test sudo -n /usr/bin/systemctl is-active qrxd.service 2>&1 || true)"
+          ! echo "$sudo_result" | grep -qiE 'password|no new privileges|not allowed'
 
       # R05 (external security re-review): confirms install.sh's
       # bootstrap_agent_ota_store actually produced the symlink chain a
@@ -227,7 +244,7 @@ jobs:
              | .updates.public_key_base64 = $pk' \
             agent.json.orig >agent.json.patched
           docker cp agent.json.patched qrx-test:/etc/qrx-node-suite/agent.json
-          docker exec qrx-test chown qrx-agent:qrx-agent /etc/qrx-node-suite/agent.json
+          docker exec qrx-test chown root:qrx-agent /etc/qrx-node-suite/agent.json
           docker exec qrx-test chmod 0640 /etc/qrx-node-suite/agent.json
           docker exec qrx-test systemctl restart qrx-agent.service
           for _ in $(seq 1 30); do

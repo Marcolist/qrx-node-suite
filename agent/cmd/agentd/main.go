@@ -326,8 +326,13 @@ func run() error {
 	mux.Handle("/", dashboardHandler(cfg.DashboardDir, storeFor(componentsBaseDir, "dashboard")))
 
 	srv := &http.Server{
-		Addr:    cfg.ListenAddr,
-		Handler: mux,
+		Addr: cfg.ListenAddr,
+		// Host validation must wrap the dashboard as well as /api. Otherwise
+		// a DNS-rebinding hostname can still load the application shell even
+		// though its later API requests are rejected. SecurityHeaders adds a
+		// restrictive CSP and anti-framing/content-sniffing headers to every
+		// response, including static assets and errors.
+		Handler: api.SecurityHeaders(api.RequireAllowedHost(mux)),
 		// ReadHeaderTimeout/ReadTimeout bound how long a client gets to
 		// send a request at all (slowloris-style attacks: opening a
 		// connection and trickling bytes to hold a goroutine/fd open

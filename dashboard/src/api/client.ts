@@ -21,7 +21,14 @@ const ADMIN_TOKEN_KEY = 'qrx_admin_token';
 
 export function getAdminToken(): string {
   try {
-    return localStorage.getItem(ADMIN_TOKEN_KEY) ?? '';
+    // v0.1.1 stored this credential persistently. Remove any stranded
+    // legacy copy instead of silently carrying that exposure forward.
+    localStorage.removeItem(ADMIN_TOKEN_KEY);
+  } catch {
+    // A browser policy may disable persistent storage independently.
+  }
+  try {
+    return sessionStorage.getItem(ADMIN_TOKEN_KEY) ?? '';
   } catch {
     return '';
   }
@@ -29,9 +36,15 @@ export function getAdminToken(): string {
 
 export function setAdminToken(token: string) {
   try {
-    localStorage.setItem(ADMIN_TOKEN_KEY, token);
+    localStorage.removeItem(ADMIN_TOKEN_KEY);
   } catch {
-    // localStorage unavailable (private browsing, etc) -- admin actions
+    // Best-effort cleanup of the v0.1.1 persistent credential.
+  }
+  try {
+    if (token) sessionStorage.setItem(ADMIN_TOKEN_KEY, token);
+    else sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+  } catch {
+    // sessionStorage unavailable (private browsing, etc) -- admin actions
     // will just fail with a clear 401/403 from the Agent instead.
   }
 }
@@ -44,13 +57,18 @@ class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
+async function request<T>(
+  path: string,
+  opts: RequestInit = {},
+  admin = false,
+  tokenOverride?: string,
+): Promise<T> {
   const headers = new Headers(opts.headers);
   if (opts.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
-  const token = getAdminToken();
-  if (token) {
+  const token = tokenOverride ?? getAdminToken();
+  if (admin && token) {
     headers.set('Authorization', `Bearer ${token}`);
   }
   const res = await fetch(path, { ...opts, headers });
@@ -69,6 +87,8 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  verifyAdmin: (token: string) =>
+    request<{ authenticated: boolean }>('/api/v1/admin/session', {}, true, token),
   health: () => request<{ status: string }>('/health'),
   version: () => request<VersionInfo>('/api/v1/version'),
   versions: () => request<UpdateCheckResult[]>('/api/v1/versions'),
@@ -93,23 +113,25 @@ export const api = {
   updatesPlan: (components: string[] = []) =>
     request<UpdateCheckResult[]>('/api/v1/updates/plan', { method: 'POST', body: JSON.stringify({ components }) }),
   updatesInstall: (component: string, opts: { channel?: string; allow_downgrade?: boolean; force?: boolean } = {}) =>
-    request<InstallResult>('/api/v1/updates/install', {
-      method: 'POST',
-      body: JSON.stringify({ component, ...opts }),
-    }),
+    request<InstallResult>(
+      '/api/v1/updates/install',
+      { method: 'POST', body: JSON.stringify({ component, ...opts }) },
+      true,
+    ),
   updatesRollback: (component: string) =>
-    request<InstallResult>('/api/v1/updates/rollback', { method: 'POST', body: JSON.stringify({ component }) }),
+    request<InstallResult>('/api/v1/updates/rollback', { method: 'POST', body: JSON.stringify({ component }) }, true),
   activateVersion: (component: string, version: string, allowUnsupported = false) =>
-    request<{ status: string; component: string }>(`/api/v1/components/${encodeURIComponent(component)}/activate-version`, {
-      method: 'POST',
-      body: JSON.stringify({ version, allow_unsupported: allowUnsupported }),
-    }),
+    request<{ status: string; component: string }>(
+      `/api/v1/components/${encodeURIComponent(component)}/activate-version`,
+      { method: 'POST', body: JSON.stringify({ version, allow_unsupported: allowUnsupported }) },
+      true,
+    ),
   qrxCoreSwitch: (version: string, profilePath: string, expertOverride = false) =>
     request<unknown>('/api/v1/qrx-core/switch', {
       method: 'POST',
       body: JSON.stringify({ version, profile_path: profilePath, expert_override: expertOverride }),
-    }),
-  restartService: () => request<{ status: string }>('/api/v1/services/qrx/restart', { method: 'POST' }),
+    }, true),
+  restartService: () => request<{ status: string }>('/api/v1/services/qrx/restart', { method: 'POST' }, true),
 };
 
 export { ApiError };

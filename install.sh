@@ -80,7 +80,10 @@ LOG_FILE="/tmp/qrx-node-suite-install.log"
 # open on LOG_FILE's underlying inode -- see init_log_file's doc comment
 # for why every log() call writes through this fd rather than reopening
 # LOG_FILE by path (R02 fix, external security re-review).
-LOG_FD=""
+# Until setup_logging replaces it with the securely opened log descriptor,
+# diagnostics use stderr. This also keeps individual helper functions safe to
+# invoke from tests or recovery code before logging has been initialized.
+LOG_FD="2"
 INSTALL_START_EPOCH=$(date +%s)
 
 # ============================================================
@@ -209,7 +212,11 @@ init_log_file() {
   dir="$(dirname "$path")"
   [[ -d "$dir" ]] || return 1
   tmp="$(mktemp "${dir}/.qrx-install-log.XXXXXX" 2>/dev/null)" || return 1
-  if ! exec {fd}>"$tmp" 2>/dev/null; then
+  # Keep the stderr suppression scoped to this group. A bare
+  # `exec {fd}>"$tmp" 2>/dev/null` has no command, so bash would retain
+  # both redirections for the rest of the installer and silently discard
+  # every later diagnostic written to stderr.
+  if ! { exec {fd}>"$tmp"; } 2>/dev/null; then
     rm -f "$tmp" 2>/dev/null
     return 1
   fi
@@ -228,7 +235,7 @@ setup_logging() {
   if mkdir -p "$QRX_LOG_DIR" 2>/dev/null; then
     LOG_FILE="${QRX_LOG_DIR}/install.log"
   fi
-  init_log_file "$LOG_FILE" || true
+  init_log_file "$LOG_FILE" || die "could not securely create installer log ${LOG_FILE}"
   log "QRX Node Suite installer v${INSTALLER_VERSION} starting"
 }
 
@@ -314,7 +321,7 @@ apt_update_done="0"
 apt_update_once() {
   if [[ "$apt_update_done" != "1" ]]; then
     verbose "running apt-get update"
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq >>"$LOG_FILE" 2>&1 || warn "apt-get update failed; continuing with whatever package lists are already cached"
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq >&"$LOG_FD" 2>&1 || warn "apt-get update failed; continuing with whatever package lists are already cached"
     apt_update_done="1"
   fi
 }
@@ -338,17 +345,17 @@ ensure_packages() {
   fi
   apt_update_once
   verbose "installing: ${missing[*]}"
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" >>"$LOG_FILE" 2>&1 \
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" >&"$LOG_FD" 2>&1 \
     || die "failed to install required packages: ${missing[*]} (see ${LOG_FILE})"
 }
 
 check_connectivity() {
   local fetch_bin="$1"
   if [[ "$fetch_bin" == "curl" ]]; then
-    curl -fsSL -m 8 -o /dev/null "https://api.github.com" 2>>"$LOG_FILE" \
+    curl -fsSL -m 8 -o /dev/null "https://api.github.com" 2>&"$LOG_FD" \
       || die "cannot reach api.github.com. Check your internet connection (and any firewall/proxy) and try again."
   else
-    wget -q -T 8 -O /dev/null "https://api.github.com" 2>>"$LOG_FILE" \
+    wget -q -T 8 -O /dev/null "https://api.github.com" 2>&"$LOG_FD" \
       || die "cannot reach api.github.com. Check your internet connection (and any firewall/proxy) and try again."
   fi
 }
@@ -405,7 +412,7 @@ SIG_URL=""
 
 github_api() {
   local url="$1"
-  curl -fsSL -H "Accept: application/vnd.github+json" -m 20 "$url" 2>>"$LOG_FILE"
+  curl -fsSL -H "Accept: application/vnd.github+json" -m 20 "$url" 2>&"$LOG_FD"
 }
 
 discover_release() {
@@ -452,7 +459,7 @@ discover_release() {
 
 download() {
   local url="$1" dest="$2"
-  curl -fsSL -m 120 -o "$dest" "$url" 2>>"$LOG_FILE" || die "download failed: ${url} (see ${LOG_FILE})"
+  curl -fsSL -m 120 -o "$dest" "$url" 2>&"$LOG_FD" || die "download failed: ${url} (see ${LOG_FILE})"
 }
 
 # verify_release downloads (or reuses, for QRX_LOCAL_TARBALL) the tarball
@@ -541,12 +548,12 @@ verify_signature() {
   pub_hex="$(echo -n "$QRX_TRUSTED_PUBLIC_KEY_B64" | base64 -d | od -An -tx1 | tr -d ' \n')"
   [[ ${#pub_hex} -eq 64 ]] || { warn "trusted public key is not 32 bytes -- installer is misconfigured"; return 1; }
   hex_to_bin "${der_prefix}${pub_hex}" "$pub_der"
-  openssl pkey -pubin -inform DER -in "$pub_der" -outform PEM -out "$pub_pem" >>"$LOG_FILE" 2>&1 \
+  openssl pkey -pubin -inform DER -in "$pub_der" -outform PEM -out "$pub_pem" >&"$LOG_FD" 2>&1 \
     || return 1
 
   local sig_der="${WORKDIR}/SHA256SUMS.sig.der"
-  base64 -d "$sig_file" >"$sig_der" 2>>"$LOG_FILE" || return 1
-  openssl pkeyutl -verify -pubin -inkey "$pub_pem" -rawin -in "$data_file" -sigfile "$sig_der" >>"$LOG_FILE" 2>&1
+  base64 -d "$sig_file" >"$sig_der" 2>&"$LOG_FD" || return 1
+  openssl pkeyutl -verify -pubin -inkey "$pub_pem" -rawin -in "$data_file" -sigfile "$sig_der" >&"$LOG_FD" 2>&1
 }
 
 # ============================================================
@@ -584,16 +591,9 @@ create_service_user() {
 # the outer symlink at ${QRX_PREFIX}/bin/agentd itself is never rewritten
 # again after this.
 #
-# Idempotent and never regresses an already-promoted version: if "current"
-# is already set (a previous install.sh run already bootstrapped it, or a
-# real OTA update has since promoted a newer version), the pointer is left
-# alone -- re-running install.sh (e.g. to fix local config) with the same
-# or an older release tarball must never move "current" backwards under a
-# self-update that already happened. This mirrors
-# store.Store.BootstrapCurrent's own no-op-if-already-set contract, the
-# Go-side counterpart of this same rule for the version *pointer* (see its
-# doc comment) -- this function is the counterpart for the *files backing
-# it*, which BootstrapCurrent deliberately never creates on its own.
+# Idempotent and monotonic: a newer installer release advances current and
+# preserves the old release as previous, the same release is a no-op, and an
+# older installer never regresses a version already promoted by OTA.
 bootstrap_agent_ota_store() {
   local extracted_agentd="$1" version="$2"
   local store_root="${QRX_DATA_DIR}/components/agent"
@@ -601,18 +601,43 @@ bootstrap_agent_ota_store() {
   local current_ptr="${store_root}/current"
   local launcher="${QRX_PREFIX}/bin/agentd"
 
-  install -d -m 0750 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" \
-    "$store_root" "${store_root}/releases" "$release_dir"
-  install -m 0755 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" \
-    "$extracted_agentd" "${release_dir}/agentd"
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] \
+    || die "release package contains an invalid VERSION value: ${version}"
+
+  # The OTA store is deliberately agent-owned. Perform every operation
+  # inside it as that unprivileged user so a compromised agent cannot turn
+  # a symlink race during a later root-run installer into a root write.
+  runuser -u "$QRX_SERVICE_USER" -- mkdir -p "$store_root" "${store_root}/releases" "$release_dir"
+  local agent_tmp="${release_dir}/.agentd.new.$$"
+  # Root opens the verified source for stdin; only the unprivileged process
+  # opens and replaces paths below the agent-controlled store.
+  runuser -u "$QRX_SERVICE_USER" -- tee "$agent_tmp" <"$extracted_agentd" >/dev/null
+  runuser -u "$QRX_SERVICE_USER" -- chmod 0755 "$agent_tmp"
+  runuser -u "$QRX_SERVICE_USER" -- mv -Tf "$agent_tmp" "${release_dir}/agentd"
 
   # -L (a symlink node, whatever it points to) or -f (the plain-text
   # fallback store.Store itself falls back to where symlinks aren't
   # available) -- either means a current version is already recorded, same
   # check as store.Store.Current()'s own os.Readlink-then-fallback.
   if [[ ! -L "$current_ptr" && ! -f "$current_ptr" ]]; then
-    ln -s "releases/${version}" "$current_ptr"
-    chown -h "${QRX_SERVICE_USER}:${QRX_SERVICE_USER}" "$current_ptr"
+    runuser -u "$QRX_SERVICE_USER" -- ln -s "releases/${version}" "$current_ptr"
+  else
+    local current_version=""
+    if [[ -L "$current_ptr" ]]; then
+      current_version="$(basename -- "$(readlink "$current_ptr")")"
+    elif [[ -f "$current_ptr" ]]; then
+      current_version="$(tr -d '[:space:]' <"$current_ptr")"
+    fi
+    if [[ -n "$current_version" && "$current_version" != "$version" ]] \
+      && dpkg --compare-versions "$version" gt "$current_version"; then
+      runuser -u "$QRX_SERVICE_USER" -- ln -sfn "releases/${current_version}" "${store_root}/.previous.new"
+      runuser -u "$QRX_SERVICE_USER" -- mv -Tf "${store_root}/.previous.new" "${store_root}/previous"
+      runuser -u "$QRX_SERVICE_USER" -- ln -sfn "releases/${version}" "${store_root}/.current.new"
+      runuser -u "$QRX_SERVICE_USER" -- mv -Tf "${store_root}/.current.new" "$current_ptr"
+      info "advanced installed Agent from ${current_version} to ${version}"
+    elif [[ -n "$current_version" && "$current_version" != "$version" ]]; then
+      warn "installed release ${version} is not newer than active Agent ${current_version}; leaving the active version unchanged"
+    fi
   fi
 
   install -d -m 0755 "${QRX_PREFIX}/bin"
@@ -742,7 +767,7 @@ generate_admin_token() {
   # 32 random bytes, base64url-ish (no padding characters to fight with in
   # shells/URLs), generated with the kernel CSPRNG via /dev/urandom -- no
   # dependency on openssl being installed just for this.
-  ADMIN_TOKEN="$(head -c 32 /dev/urandom | base64 | tr -d '=+/\n' | cut -c1-40)"
+  ADMIN_TOKEN="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n' | cut -c1-40)"
 }
 
 write_config() {
@@ -756,6 +781,8 @@ write_config() {
   install -d -m 0750 -o root -g "$QRX_SERVICE_USER" "$QRX_CONFIG_DIR"
 
   if [[ -f "$config_file" ]]; then
+    chown "root:${QRX_SERVICE_USER}" "$config_file"
+    chmod 0640 "$config_file"
     info "existing config found at ${config_file} -- leaving it untouched"
     return 0
   fi
@@ -807,7 +834,7 @@ write_config() {
   "log_level": "info"
 }
 JSON
-  chown "${QRX_SERVICE_USER}:${QRX_SERVICE_USER}" "$config_file"
+  chown "root:${QRX_SERVICE_USER}" "$config_file"
   chmod 0640 "$config_file"
   ok "wrote configuration to ${config_file}"
 }
@@ -843,7 +870,7 @@ install_qrx_core_sudoers() {
 ${QRX_SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl start qrxd.service, /usr/bin/systemctl stop qrxd.service, /usr/bin/systemctl restart qrxd.service, /usr/bin/systemctl is-active qrxd.service
 SUDOERS
   chmod 0440 "$tmp"
-  if ! visudo -c -f "$tmp" >>"$LOG_FILE" 2>&1; then
+  if ! visudo -c -f "$tmp" >&"$LOG_FD" 2>&1; then
     rm -f "$tmp"
     warn "generated qrxd.service sudoers rule failed visudo validation -- not installed; Core service control (start/stop/restart) will not work"
     return 1
@@ -888,7 +915,11 @@ WorkingDirectory=${QRX_PREFIX}
 Restart=always
 RestartSec=2
 
-NoNewPrivileges=true
+# The Agent uses a command-exact sudoers rule to manage qrxd.service.
+# NoNewPrivileges=true makes Linux reject sudo's setuid transition before
+# sudo can evaluate that rule, so it would make every Core service action
+# fail. Keep privilege escalation available only through that narrow rule.
+NoNewPrivileges=false
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=${QRX_DATA_DIR} ${QRX_CONFIG_DIR} ${QRX_LOG_DIR}
@@ -914,7 +945,7 @@ WantedBy=multi-user.target
 UNIT
 
   systemctl daemon-reload
-  systemctl enable qrx-agent.service >>"$LOG_FILE" 2>&1
+  systemctl enable qrx-agent.service >&"$LOG_FD" 2>&1
   systemctl restart qrx-agent.service
   ok "systemd service installed, enabled, and started"
 }
@@ -1070,7 +1101,8 @@ print_summary() {
     echo ""
     echo "  ${ADMIN_TOKEN}"
     echo ""
-    echo "  It is stored in ${QRX_CONFIG_DIR}/agent.json (root-readable only) and"
+    echo "  It is stored in ${QRX_CONFIG_DIR}/agent.json (root-owned and readable"
+    echo "  by the qrx-agent service group) and"
     echo "  will not be shown again by this installer."
   fi
   echo ""
@@ -1099,6 +1131,11 @@ print_summary() {
     echo "access from your local network, edit ${QRX_CONFIG_DIR}/agent.json's"
     echo "\"listen_addr\" to \"0.0.0.0:${QRX_LISTEN_PORT}\" and run:"
     echo "  systemctl restart qrx-agent"
+    echo ""
+  else
+    echo "Security: LAN mode listens on every network interface. Use it only on"
+    echo "a trusted private LAN. On a VPS, keep loopback mode and use a VPN, SSH"
+    echo "tunnel, or TLS reverse proxy; never send the admin token over public HTTP."
     echo ""
   fi
   echo "QRX Node Suite will start automatically after reboot."

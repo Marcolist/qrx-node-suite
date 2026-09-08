@@ -47,6 +47,8 @@ threat model above.
 | Threat | Mitigation |
 |---|---|
 | **Installer log symlink attack** (a compromised, unprivileged `qrx-agent` process plants a symlink at `install.log`'s path so a later root-run `install.sh` write follows it instead of the real log file) | `QRX_LOG_DIR` is root-owned (`root:qrx-agent`, mode `0750`), not agent-writable, so `qrx-agent` can no longer place anything there at all; `setup_logging()` creates `install.log` via `init_log_file()`, which opens a file descriptor (`LOG_FD`) on a private `mktemp`-generated temp file *before* that file is ever visible at the public path, then atomically `rename(2)`s it into place -- safe against both a symlink already present and one raced into place mid-install. Critically, every `log()` call for the rest of the install writes through that same held descriptor, never by reopening `install.log`'s path -- a file descriptor is bound to the underlying inode, not the path, so a symlink planted at *any later point* (not just before the first write) can no longer redirect anything. Covers a system upgraded from an older, vulnerable installer that still has an agent-owned log directory left over from its first install. As of the fix for an external audit's F04 finding, hardened by two rounds of external re-review: R02 first closed the race between checking for a symlink and truncating through it (an atomic rename replaced that check-then-act pattern), then a second re-review found the atomic rename alone only protected the *first* write -- every later `log()` call still reopened the path each time, reproducibly exploitable, closed by moving to a held file descriptor. See `docs/installer.md#installer-log-directory`. |
+| **Installer writes as root inside the agent-owned OTA store** (a compromised `qrx-agent` replaces a release directory or target with a symlink before a later reinstall) | Release directories, binaries, and version pointers below `${QRX_DATA_DIR}/components/agent` are now created and replaced through `runuser` as `qrx-agent`; root only opens the already-verified source artifact for stdin. A malicious link can therefore reach only paths the already-compromised service account could write itself, not turn the installer into a privileged writer. The package `VERSION` is also validated before it becomes a path component. |
+| **Admin-token configuration writable by the Agent** (compromise of the web-facing service could replace its own configured bearer token and gain durable administrative access after restart) | `agent.json` is `root:qrx-agent` mode `0640`: the service can read its token and settings but cannot modify them. A reinstall also repairs ownership and mode on an existing config. Docker CI checks both the exact metadata and a write attempt as `qrx-agent`. |
 | **Uninstaller delete-target hijack** (a compromised, unprivileged `qrx-agent` process points `uninstall.sh --remove-qrx-core`'s marker file at an arbitrary directory, which is then `rm -rf`'d as root) | The marker (`qrx-core-installed-by-this-installer`) lives under `QRX_CONFIG_DIR` (`root:qrx-agent`, mode `0750`), never the agent-writable `QRX_DATA_DIR`, so `qrx-agent` cannot plant or rewrite it at all. As a second, independent line of defense, `uninstall.sh` resolves the marker's content (following any symlinks) and refuses to remove anything that doesn't fall under the documented QRX Core install root (`/opt/qrx`) -- never "/", "/etc", or a symlink escape. As of the fix for an external audit's F05 finding; see `docs/installer.md#qrx-core-removal-safety`. |
 | **`--remove-qrx-core` silently doing nothing when combined with `--purge-data`** (moving the F05 marker under `QRX_CONFIG_DIR` meant `--purge-data`'s `rm -rf` of that whole directory could delete the marker before `--remove-qrx-core` ever read it -- an operator explicitly asking for both, e.g. when decommissioning a machine, would end up with QRX Core silently left behind) | `main()` now runs `remove_qrx_core` before `purge_data`, so the marker is always read while it still exists. As of the fix for R04, an external re-review of the F05 fix; see `docs/installer.md#qrx-core-removal-safety`. |
 | **Documentation overstating what re-running `install.sh` does** (`docs/installer.md#upgrades` claimed a re-run "does not re-install or touch your existing configuration/database", implying a pure detect-and-stop, when the actual code only warns before continuing through `install_release`/`install_systemd_service` regardless -- reinstalling the binary and dashboard and restarting `qrx-agent.service` every time, outside the OTA system's staged/health-checked/rollback-safe path, even though configuration and the database genuinely are left alone) | Not a code bug in the sense of doing something unsafe -- every non-idempotent side effect (reinstalling the binary/dashboard, restarting the service) is itself safe, just not what the docs promised. Fixed by correcting the documentation and the script's own runtime warning message to describe what re-running actually does, rather than restricting the installer to match an overstated claim: the Agent's own OTA system already exists and is the better tool for a routine upgrade, and this script deliberately stays willing to run so it remains usable to recover a broken/incomplete first install. As of the fix for an external audit's F14 finding; see `docs/installer.md#upgrades`. |
@@ -92,10 +94,7 @@ matching the actual behavior rather than a test); F13 is partially fixed
 (see [Hard guarantees](#hard-guarantees-detail) item 7 for what's fixed,
 and below for what's still deferred); F09, F10, and F12 are each
 partially fixed, below, with the same fixed/deferred split noted inline;
-F15 has a reachability assessment against each named advisory but still
-no committed lockfile (this sandbox's own network policy blocks npm
-registry access -- see its note below for why a lockfile wasn't
-hand-written as a substitute).
+F15 is fixed and verified with a committed lockfile and a live npm audit.
 The
 remaining findings were independently verified against the current source
 (never taken on faith from the report) and are confirmed real, but are
@@ -114,7 +113,8 @@ appended to an already-large change.
   could reach every unauthenticated read endpoint, and even the
   `RequireAdmin`-gated ones with a stolen/guessed token, from a page
   hosted anywhere on the internet, regardless of `QRX_DASHBOARD_BIND`.
-  `RequireAllowedHost` (`agent/api/hostcheck.go`) now wraps the entire mux
+  `RequireAllowedHost` (`agent/api/hostcheck.go`) now wraps the entire HTTP
+  handler, including both API routes and dashboard static assets,
   and rejects any request whose `Host` header doesn't name a loopback or
   private-network address (RFC 1918 / link-local / `localhost`) --
   config-free by design, since a fixed allowlist of one detected-at-install
@@ -123,7 +123,11 @@ appended to an already-large change.
   browser already blocks a cross-origin page from reading any response,
   and the admin endpoints' required `Authorization` header forces a CORS
   preflight this server never answers, blocking the write itself too --
-  `Host` was the one gap DNS rebinding could still exploit. **Still
+  `Host` was the one gap DNS rebinding could still exploit. The dashboard
+  now verifies the bearer token before displaying a successful login,
+  retains it only in per-tab `sessionStorage`, sends it only on protected
+  admin requests, and every response receives a restrictive CSP plus
+  anti-framing, anti-sniffing, referrer, and permissions headers. **Still
   deferred:** read endpoints (`/api/v1/status`, `/api/v1/system`,
   `/api/v1/updates`, ...) remain unauthenticated by design, and the admin
   bearer token still travels in cleartext (no TLS termination exists in
@@ -178,7 +182,12 @@ appended to an already-large change.
   cross-checks `opts.Profile.QRXCoreVersion` against the manifest's
   offered version the same way `SwitchVersion` already did -- without it,
   `CheckSwitchSafety` could validate a profile for an unrelated version
-  while actually switching to whatever the manifest offered. **Still
+  while actually switching to whatever the manifest offered. The shipped
+  unit deliberately leaves `NoNewPrivileges` disabled: enabling it blocks
+  sudo's setuid transition before the command-exact sudoers rule can be
+  evaluated and makes every Core service action fail. The Agent process
+  remains unprivileged; escalation is limited to the four exact
+  `systemctl ... qrxd.service` commands in that rule. **Still
   deferred:** `StartCore`'s `dir` argument is still ignored, and no
   `Probe` is configured. Both need a confirmed QRX Core deployment/CLI
   contract this project doesn't have: `docs/qrx-0.0.7-interface.md` (its
@@ -210,63 +219,17 @@ appended to an already-large change.
   (a second `/ready` endpoint? redefine `/health`'s semantics, breaking
   anything that already polls it as pure liveness?) this document
   shouldn't make unilaterally.
-- **F15 -- npm advisories (reachability assessed; lockfile still
-  blocked).** `dashboard/package.json` still has no committed lockfile --
-  not by choice: this session's sandbox blocks direct access to
-  `registry.npmjs.org` at the network-policy layer (`npm install` and a
-  direct `curl` both get an explicit `403`/`host_not_allowed` from the
-  egress proxy, not a transient failure), so `npm install`/`npm ci` cannot
-  run here at all, and a lockfile was deliberately NOT hand-written (a
-  fabricated lockfile with invented integrity hashes and resolved
-  versions would be actively wrong, not just incomplete -- it could
-  silently misdescribe what `npm ci` actually installs). What follows is
-  a manual reachability assessment against each of the 4 advisories the
-  audit named, matched to public GHSA records by description (no live
-  `npm audit` was run):
-  - **Vite Windows path check** (`server.fs.deny` bypassed via a
-    backslash on Windows, `GHSA-93m4-6634-74q7`): affects Vite
-    `>=5.2.6,<=5.4.20` (fixed in `5.4.21`); `package.json`'s prior
-    `"vite": "^5.4.0"` could have resolved anywhere in that vulnerable
-    range absent a lockfile, so it's now pinned to `^5.4.21` (a one-line
-    fix that doesn't need a lockfile to take effect once one exists). Even
-    unpatched, the advisory's own precondition -- the dev server
-    explicitly exposed to the network via `--host`/`server.host` -- is
-    never met here: `dashboard/vite.config.ts` sets no `server.host`
-    (Vite's own default keeps it loopback-only), and the dev server is
-    never part of any shipped install in any case (`install.sh` ships
-    `vite build`'s static output, served by `cmd/agentd`'s own Go HTTP
-    handler, not a running Vite process).
-  - **Vite sourcemap traversal** (`GHSA-4w7w-66w2-5vf9`, path traversal in
-    optimized-deps `.map` handling): confirmed to affect Vite 6.x/7.x/8.x
-    only, not the 5.x line this project is pinned to at all -- not
-    applicable regardless of exact resolved version.
-  - **esbuild dev-server issue** (`GHSA-67mh-4wv8-2f99`: esbuild's dev
-    server sets `Access-Control-Allow-Origin: *`, letting any website read
-    responses from a developer's local dev server; esbuild `<=0.24.2`,
-    fixed in `0.25.0`; esbuild is a transitive dependency of Vite 5.4.x's
-    dev server, not declared directly): same reasoning as the Vite finding
-    above -- dev-server-only, never network-exposed by this project's own
-    config, never part of a shipped install.
-  - **React Router redirect/SSR-hydration issue** (closest public match:
-    `GHSA-337j-9hxr-rhxg` / CVE-2026-53666, arbitrary constructor
-    injection via `deserializeErrors()` during SSR hydration): affects
-    `react-router` (the v7 unified package) `<=7.18.0`; this project
-    depends on the older, separate `react-router-dom` `^6.26.0` package,
-    a different major line. Moot either way: `dashboard/src/App.tsx` uses
-    `HashRouter` -- pure client-side rendering, no server-side rendering
-    or hydration anywhere in this codebase -- and the advisory's own text
-    says it "does not impact applications using Declarative Mode," which
-    is exactly what this is.
-
-  In short: none of the 4 named advisories reach this project's actual
-  production deployment (a Go binary serving pre-built static files, no
-  Node.js process involved at all once built), and the one that could
-  plausibly affect a developer's local machine (the Vite/esbuild dev-
-  server pair) already fails its own network-exposure precondition here.
-  Generating and committing a real lockfile, and running a real `npm
-  audit` against it, is still worth doing in an environment that can
-  reach the npm registry -- this assessment is a reasoned stand-in, not a
-  replacement for that.
+- **F15 -- npm advisories (fixed and verified).** A real npm registry check
+  is now part of this release. `dashboard/package-lock.json` is committed,
+  so CI and release builds resolve the reviewed dependency graph through
+  `npm ci`. Vite was upgraded to 6.4.3, `@vitejs/plugin-react` to 4.5.1,
+  and React Router DOM to 7.18.3. These versions close the Vite path
+  traversal/Windows path issues, the affected esbuild dependency, and the
+  React Router redirect/SSR hydration advisories reported by `npm audit`.
+  A clean `npm ci`, production build, and full `npm audit` complete with
+  zero known vulnerabilities. The shipped service still contains no Node
+  process: it serves only the resulting static assets through Go's HTTP
+  server.
 
 Every fix above was verified against the actual current source before
 being made (never assumed from the audit report's prose), and every
