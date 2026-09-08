@@ -53,7 +53,7 @@ QRX_LOCAL_TARBALL="${QRX_LOCAL_TARBALL:-}"
 # compromise of one signing flow (e.g. the machine/secret that signs
 # releases) doesn't also let an attacker push a malicious self-update to
 # every already-installed Agent, or vice versa.
-QRX_TRUSTED_PUBLIC_KEY_B64="tIxWU9IsRUw1/TwS+mvkhBUjPWVezLQZ9S3uVm6BSJs="
+QRX_TRUSTED_PUBLIC_KEY_B64="GmPkfWlATx9dN7WI6xIiPuwdjwuNktUlg7dDoy+VA5E="
 
 # The OTA update manifest signing public key (agent/cmd/gen-signing-key,
 # agent/updates/manifest) -- written into every install's generated
@@ -69,7 +69,7 @@ QRX_TRUSTED_PUBLIC_KEY_B64="tIxWU9IsRUw1/TwS+mvkhBUjPWVezLQZ9S3uVm6BSJs="
 # MANIFEST_SIGNING_PRIVATE_KEY repo secret) for where the corresponding
 # private key signs manifests -- that secret is not the same as
 # RELEASE_SIGNING_PRIVATE_KEY, see the comment above.
-QRX_TRUSTED_MANIFEST_PUBLIC_KEY_B64="mXM+5S/vc9F+poSegmqBqOLsOXMb9NpU7kAtLDTdoHk="
+QRX_TRUSTED_MANIFEST_PUBLIC_KEY_B64="ZW2DfVIyPVog7CGBdXglLdoO9DDsqbZzvg95E1st+IM="
 
 INSTALLER_VERSION="1"
 TOTAL_STEPS=8
