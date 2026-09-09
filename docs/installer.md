@@ -245,6 +245,11 @@ continues:
   bundled dashboard is seeded into the OTA store so it is reported as the
   current version immediately and is available for later rollback. See
   `docs/updates.md#dashboard-and-compatibility-profiles`.
+
+Reinstalling also migrates the `components/` directory created by releases
+older than 0.1.5 from `root:root` to the service account. The migration uses
+`chown -h` and rejects symlinks before any further access, so an agent that
+controls its data directory cannot redirect the root operation elsewhere.
 - The systemd unit is rewritten and **`qrx-agent.service` is restarted**
   every time, even if nothing about it actually changed.
 

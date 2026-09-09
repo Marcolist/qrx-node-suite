@@ -136,6 +136,13 @@ jobs:
 
       - name: Install QRX Node Suite inside the container
         run: |
+          # Debian exercises migration from the legacy layout where GNU
+          # install -d left the intermediate components/ directory root-owned.
+          if [[ "${{ matrix.image }}" == "debian:12" ]]; then
+            docker exec qrx-test useradd --system --no-create-home --home-dir /var/lib/qrx-node-suite --shell /usr/sbin/nologin qrx-agent
+            docker exec qrx-test install -d -m 0750 -o qrx-agent -g qrx-agent /var/lib/qrx-node-suite
+            docker exec qrx-test install -d -m 0755 -o root -g root /var/lib/qrx-node-suite/components
+          fi
           docker exec \
             -e QRX_LOCAL_TARBALL=/workspace/$(basename "$TARBALL") \
             -e QRX_INSTALL_QRX_CORE=skip \
@@ -147,6 +154,7 @@ jobs:
           docker exec qrx-test systemctl is-active qrx-agent.service
           docker exec qrx-test curl -fsS http://127.0.0.1:8787/health
           docker exec qrx-test systemctl is-enabled qrx-agent.service
+          test "$(docker exec qrx-test stat -c '%a %U:%G' /var/lib/qrx-node-suite/components)" = "750 qrx-agent:qrx-agent"
           docker exec qrx-test curl -fsS http://127.0.0.1:8787/api/v1/version | jq -e '.dashboard_version == "0.0.0-ci"'
           docker exec qrx-test curl -fsS http://127.0.0.1:8787/api/v1/updates | jq -e '.dashboard.current == "0.0.0-ci"'
           test "$(docker exec qrx-test stat -c '%a %U:%G' /etc/qrx-node-suite/agent.json)" = "640 root:qrx-agent"

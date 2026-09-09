@@ -141,8 +141,9 @@ on_err() {
   local exit_code=$? line="$1"
   echo "" >&2
   echo "${COLOR_RED}Installation failed${COLOR_RESET} (install.sh:${line}, exit ${exit_code})." >&2
-  echo "No changes were made beyond what earlier steps already logged as done;" >&2
-  echo "your existing QRX Core installation and QRX Node Suite data (if any) were not touched." >&2
+  echo "Steps already shown as complete may have changed installed files or version" >&2
+  echo "pointers. Existing configuration, database, and QRX Core data are preserved;" >&2
+  echo "inspect the log below, correct the error, and rerun the installer." >&2
   echo "" >&2
   echo "Log: ${LOG_FILE}" >&2
   cleanup_workdir
@@ -568,6 +569,23 @@ create_service_user() {
   fi
 }
 
+# Older installers let root create the intermediate "components" directory
+# while making only its children agent-owned. Migrate that exact directory
+# without ever following a link supplied from the agent-owned data directory:
+# chown -h changes a link node itself, and every later path operation runs as
+# the unprivileged service account.
+prepare_ota_components_root() {
+  local components_root="${QRX_DATA_DIR}/components"
+  if [[ ! -e "$components_root" && ! -L "$components_root" ]]; then
+    runuser -u "$QRX_SERVICE_USER" -- mkdir "$components_root"
+  else
+    chown -h "${QRX_SERVICE_USER}:${QRX_SERVICE_USER}" "$components_root"
+  fi
+  [[ -d "$components_root" && ! -L "$components_root" ]] \
+    || die "OTA components path is not a real directory: ${components_root}"
+  runuser -u "$QRX_SERVICE_USER" -- chmod 0750 "$components_root"
+}
+
 # bootstrap_agent_ota_store lays the freshly downloaded agentd binary into
 # the OTA store's own on-disk layout (agent/updates/store package:
 # <baseDir>/agent/releases/<version>/agentd, current -> releases/<version>)
@@ -719,6 +737,7 @@ install_release() {
   [[ -n "$ota_version" ]] || ota_version="$RELEASE_VERSION"
 
   install -d -m 0750 -o "$QRX_SERVICE_USER" -g "$QRX_SERVICE_USER" "$QRX_DATA_DIR"
+  prepare_ota_components_root
   bootstrap_agent_ota_store "${extract_dir}/agentd" "$ota_version"
 
   if [[ -d "${extract_dir}/dashboard" ]]; then
