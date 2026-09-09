@@ -3,8 +3,8 @@ name: Release
 # Builds and publishes the prebuilt artifacts install.sh downloads
 # (docs/installer.md). Triggered by pushing a tag like v0.1.0 -- the tag
 # name (minus the leading "v") becomes the release version, injected into
-# the agentd binary via -ldflags (agent/cmd/agentd/main.go's suiteVersion/
-# agentVersion are `var`, not `const`, specifically so this works).
+# the agentd binary via -ldflags (agent/cmd/agentd/main.go's suiteVersion,
+# agentVersion, and bundled-dashboard version are variables for this).
 on:
   push:
     tags:
@@ -79,7 +79,7 @@ jobs:
         working-directory: agent
         run: |
           go build -trimpath \
-            -ldflags "-s -w -X main.suiteVersion=${{ steps.version.outputs.version }} -X main.agentVersion=${{ steps.version.outputs.version }}" \
+            -ldflags "-s -w -X main.suiteVersion=${{ steps.version.outputs.version }} -X main.agentVersion=${{ steps.version.outputs.version }} -X main.dashboardVersion=${{ steps.version.outputs.version }}" \
             -o ../agentd ./cmd/agentd
 
       - name: Verify binary architecture

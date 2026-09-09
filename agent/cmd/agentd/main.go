@@ -40,20 +40,21 @@ import (
 	"qrx-node-suite/agent/version"
 )
 
-// These identify THIS build. suiteVersion/agentVersion are independent
+// These identify THIS build. Suite, Agent, and Dashboard are independent
 // version domains (docs/updates.md#component-version-model) -- bump them
 // as part of a release, never derive one from the other. They are `var`,
 // not `const`, so the release pipeline can inject the real tagged version
-// with `-ldflags "-X main.suiteVersion=... -X main.agentVersion=..."`
+// with `-ldflags "-X main.suiteVersion=... -X main.agentVersion=...
+// -X main.dashboardVersion=..."`
 // (.github/workflows/release.yml) -- a local `go build` with no ldflags
 // keeps these development-default values.
 var (
-	suiteVersion = "0.1.0-dev"
-	agentVersion = "0.1.0-dev"
+	suiteVersion     = "0.1.0-dev"
+	agentVersion     = "0.1.0-dev"
+	dashboardVersion = "0.1.0-dev"
 )
 
 const (
-	dashboardVersionFallback = "unbuilt" // overridden once GET /api/v1/version can read the served dashboard's own version marker
 	apiVersion               = "v1"
 	telemetryProtocolVersion = 1
 )
@@ -218,14 +219,22 @@ func run() error {
 		logger.Warn("no valid update manifest public key configured -- update installs will fail signature verification until one is set", "error", err)
 	}
 
+	dashboardStore := storeFor(componentsBaseDir, "dashboard")
 	versionInfo := func() models.VersionInfo {
 		active := registry.Active()
 		adapterName, adapterVersion := "", ""
 		if active != nil {
 			adapterName, adapterVersion = active.Name(), active.Version()
 		}
+		// The build-time value describes install.sh's bundled dashboard. Once
+		// a dashboard OTA has been promoted, its store pointer is authoritative
+		// and changes without restarting this process.
+		activeDashboardVersion := dashboardVersion
+		if v, ok, err := dashboardStore.Current(); err == nil && ok {
+			activeDashboardVersion = v
+		}
 		return models.VersionInfo{
-			SuiteVersion: suiteVersion, AgentVersion: agentVersion, DashboardVersion: dashboardVersionFallback,
+			SuiteVersion: suiteVersion, AgentVersion: agentVersion, DashboardVersion: activeDashboardVersion,
 			AdapterName: adapterName, AdapterVersion: adapterVersion, QRXCoreVersion: qrxCoreVersion,
 			APIVersion: apiVersion, TelemetryProtocolVersion: telemetryProtocolVersion, ConfigSchemaVersion: cfg.SchemaVersion,
 		}
@@ -323,7 +332,7 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.Handle("/api/", NewLoggingMiddleware(logger, apiMux))
 	mux.Handle("/health", NewLoggingMiddleware(logger, apiMux))
-	mux.Handle("/", dashboardHandler(cfg.DashboardDir, storeFor(componentsBaseDir, "dashboard")))
+	mux.Handle("/", dashboardHandler(cfg.DashboardDir, dashboardStore))
 
 	srv := &http.Server{
 		Addr: cfg.ListenAddr,

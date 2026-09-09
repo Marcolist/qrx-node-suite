@@ -75,7 +75,7 @@ compatible follow-up, not required for the current release process to work.
 To build a release tarball by hand (matching what CI does):
 
 ```sh
-cd agent && go build -ldflags "-X main.suiteVersion=0.1.0 -X main.agentVersion=0.1.0" -o ../agentd ./cmd/agentd
+cd agent && go build -ldflags "-X main.suiteVersion=0.1.0 -X main.agentVersion=0.1.0 -X main.dashboardVersion=0.1.0" -o ../agentd ./cmd/agentd
 cd dashboard && npm ci && npm run build && cd ..
 mkdir -p pkg/dashboard
 cp agentd pkg/agentd && cp -a dashboard/dist/. pkg/dashboard/

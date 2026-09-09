@@ -87,7 +87,7 @@ jobs:
       - name: Build agentd
         working-directory: agent
         run: |
-          go build -ldflags "-X main.suiteVersion=0.0.0-ci -X main.agentVersion=0.0.0-ci" \
+          go build -ldflags "-X main.suiteVersion=0.0.0-ci -X main.agentVersion=0.0.0-ci -X main.dashboardVersion=0.0.0-ci" \
             -o ../agentd ./cmd/agentd
 
       - name: Build dashboard
@@ -147,6 +147,7 @@ jobs:
           docker exec qrx-test systemctl is-active qrx-agent.service
           docker exec qrx-test curl -fsS http://127.0.0.1:8787/health
           docker exec qrx-test systemctl is-enabled qrx-agent.service
+          docker exec qrx-test curl -fsS http://127.0.0.1:8787/api/v1/version | jq -e '.dashboard_version == "0.0.0-ci"'
           test "$(docker exec qrx-test stat -c '%a %U:%G' /etc/qrx-node-suite/agent.json)" = "640 root:qrx-agent"
           docker exec qrx-test su -s /bin/sh qrx-agent -c 'test ! -w /etc/qrx-node-suite/agent.json'
 
@@ -207,7 +208,7 @@ jobs:
       - name: Build a second agentd version for the self-update test
         run: |
           (cd agent && go build -o ../agentd-b \
-            -ldflags "-X main.suiteVersion=0.0.1-ci-b -X main.agentVersion=0.0.1-ci-b" \
+            -ldflags "-X main.suiteVersion=0.0.1-ci-b -X main.agentVersion=0.0.1-ci-b -X main.dashboardVersion=0.0.1-ci-b" \
             ./cmd/agentd)
           chmod 0755 agentd-b
 
