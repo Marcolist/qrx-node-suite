@@ -126,18 +126,15 @@ staging or promotion, and only if nothing is recorded yet (a no-op once any
 real update has ever promoted something -- it never overwrites real state).
 `cmd/agentd`'s `buildControllers` calls it for `agent` and any active adapter
 at every startup, using the running binary's own compiled-in version. Without
-it, a freshly bootstrapped install (its binary copied into place by
-`install.sh`, never staged/promoted through this store) has an empty
+it, a freshly bootstrapped install has an empty
 `Current()` until its first-ever OTA update succeeds -- and
 `manifest.CheckNotDowngrade`/`CheckNotReplayed` both explicitly treat an empty
 current-version/last-seen as "nothing to compare against yet" and let
 anything through. `BootstrapCurrent` closes that gap for the version-tracking
-piece of it. Fix for the R05 finding (external security re-review of the F07
-fix) -- see `docs/security.md`'s "Known limitation" note for the larger,
-still-open piece of the same finding: a promoted self-binary update still has
-no path to actually become the binary that runs (`${QRX_PREFIX}/bin/agentd`,
-what systemd always execs, is a completely separate, fixed path `Promote`
-never touches).
+piece of it. `install.sh` additionally places the Agent binary in this store
+and makes systemd's fixed launcher path resolve through `current`, so later
+promotions become executable after the requested service restart. Fix for
+the R05 finding (external security re-review of the F07 fix).
 
 ## Safe update process
 
@@ -260,11 +257,12 @@ These do **not** require a process restart:
   Agent serves whichever directory `Store.CurrentDir()` currently resolves
   to on each request, so activation is instant. Health check: the newly
   activated directory has an `index.html`. `cmd/agentd`'s HTTP handler
-  falls back to the install-time-seeded directory (`cfg.DashboardDir`,
-  copied there by `install.sh` before the OTA store has anything
-  staged/promoted at all) only when the store has no active version yet --
-  once any dashboard update has been promoted, the store is always the
-  source of truth. Before the fix for an external audit's F07 finding, the
+  falls back to `cfg.DashboardDir` only for developer/manual installs or
+  older deployments with no active dashboard store entry. Current
+  `install.sh` releases seed the verified bundled dashboard and its version
+  into the store immediately, so update status does not offer the installed
+  build again and the store is the source of truth from first boot. Before
+  the fix for an external audit's F07 finding, the
   handler was wired to the static `cfg.DashboardDir` unconditionally, so a
   dashboard OTA install could verify/stage/promote and report success with
   zero effect on what was actually served.

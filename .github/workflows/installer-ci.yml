@@ -148,6 +148,7 @@ jobs:
           docker exec qrx-test curl -fsS http://127.0.0.1:8787/health
           docker exec qrx-test systemctl is-enabled qrx-agent.service
           docker exec qrx-test curl -fsS http://127.0.0.1:8787/api/v1/version | jq -e '.dashboard_version == "0.0.0-ci"'
+          docker exec qrx-test curl -fsS http://127.0.0.1:8787/api/v1/updates | jq -e '.dashboard.current == "0.0.0-ci"'
           test "$(docker exec qrx-test stat -c '%a %U:%G' /etc/qrx-node-suite/agent.json)" = "640 root:qrx-agent"
           docker exec qrx-test su -s /bin/sh qrx-agent -c 'test ! -w /etc/qrx-node-suite/agent.json'
 

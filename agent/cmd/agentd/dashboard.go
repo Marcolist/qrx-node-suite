@@ -15,10 +15,10 @@ import (
 // all.
 //
 // Which directory that is, per request: st.CurrentDir() (the OTA store's
-// "current" pointer for the dashboard component) if a dashboard update has
-// ever actually been promoted through it, otherwise installDir -- the
-// build install.sh copies straight into QRX_PREFIX/dashboard at install
-// time, before the OTA store has anything staged/promoted at all. Without
+// "current" pointer for the dashboard component) when one exists,
+// otherwise installDir. Current installers seed the verified bundled build
+// into that store; the fallback also supports developer/manual installs
+// and older deployments that predate store seeding. Without
 // this fallback-to-store-first resolution (fixed for an external audit's
 // F07 finding), a "successful" dashboard OTA install would verify, stage,
 // and promote correctly, yet every request would keep being served from
@@ -27,10 +27,9 @@ import (
 // next request after Promote() sees the new build, with no Agent restart.
 // Resolving per request (not once at startup) is what makes that true.
 //
-// This sandbox has no network access to run `npm install && npm run build`
-// (see docs/development.md), so shipping a go:embed'd dist/ isn't possible
-// here; a release build process should build the dashboard first and
-// go:embed the result instead of serving from disk. See docs/deployment.md.
+// Release builds compile and package the dashboard separately so dashboard
+// OTA updates remain possible without replacing the Agent binary. See
+// docs/deployment.md.
 func dashboardHandler(installDir string, st *store.Store) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		dir := installDir

@@ -61,6 +61,7 @@ sudo bash install.sh
 | `/etc/qrx-node-suite/agent.json` | Configuration (root + `qrx-agent` readable only) |
 | `/var/lib/qrx-node-suite/` | SQLite database, OTA component store |
 | `/var/lib/qrx-node-suite/components/agent/` | The agent's own OTA store: `releases/<version>/agentd`, `current -> releases/<version>` |
+| `/var/lib/qrx-node-suite/components/dashboard/` | Active and rollback dashboard builds managed by the OTA store |
 | `/var/log/qrx-node-suite/install.log` | Installer's own log (root-owned; see [Installer log directory](#installer-log-directory)) |
 | `/etc/systemd/system/qrx-agent.service` | systemd unit |
 | `/usr/local/bin/qrx-node-suite` | `status` / `logs` / `uninstall` convenience wrapper |
@@ -239,10 +240,11 @@ continues:
   root-run reinstall into a privileged symlink write. The directory
   `/opt/qrx-node-suite/dashboard` is replaced outright with whatever the
   re-run downloaded. If a dashboard OTA update has ever been promoted
-  through the store, this has no visible effect (`cmd/agentd`'s handler
-  only falls back to this directory when the store has nothing active yet
-  -- see `docs/updates.md#dashboard-and-compatibility-profiles`); if one
-  never has, a re-run can change what's actually served.
+  through the store, the bundled build is activated only when it is newer;
+  an older installer never regresses an OTA-promoted dashboard. The verified
+  bundled dashboard is seeded into the OTA store so it is reported as the
+  current version immediately and is available for later rollback. See
+  `docs/updates.md#dashboard-and-compatibility-profiles`.
 - The systemd unit is rewritten and **`qrx-agent.service` is restarted**
   every time, even if nothing about it actually changed.
 

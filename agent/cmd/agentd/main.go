@@ -426,14 +426,10 @@ func parsePublicKey(b64 string) (ed25519.PublicKey, error) {
 // Current() non-empty from the very first update check, restoring
 // manifest.CheckNotDowngrade/CheckNotReplayed's protection on that first
 // check instead of leaving both silently disabled (see BootstrapCurrent's
-// doc comment; R05 fix, external security re-review). Deliberately NOT
-// done for "dashboard": its install-time content lives outside the OTA
-// store entirely (cfg.DashboardDir, copied there by install.sh), and
-// cmd/agentd's dashboard handler (the F07 fix) already falls back to that
-// directory specifically when the store has nothing real to serve --
-// bootstrap-registering a version with no corresponding on-disk release
-// would defeat that fallback and break dashboard serving on every fresh
-// install.
+// doc comment; R05 fix, external security re-review). Dashboard is not
+// registered here because a version pointer alone is insufficient: the
+// matching static assets must exist too. install.sh seeds both the bundled
+// assets and pointer atomically; dashboard OTA updates use Stage/Promote.
 // selfUpdateRollbackRequiresRestart reports whether resuming a self-update
 // for component with the given history record requires exiting this
 // process so the process supervisor (systemd's Restart=always) starts a

@@ -644,6 +644,52 @@ bootstrap_agent_ota_store() {
   ln -sfn "${store_root}/current/agentd" "$launcher"
 }
 
+# Seeds the bundled, already release-verified dashboard into the same OTA
+# store its live handler and future dashboard updates use. Without this,
+# every installer-based deployment has no dashboard "current" version and
+# immediately advertises its already-installed version as an update.
+bootstrap_dashboard_ota_store() {
+  local extracted_dashboard="$1" version="$2"
+  local store_root="${QRX_DATA_DIR}/components/dashboard"
+  local release_dir="${store_root}/releases/${version}"
+  local current_ptr="${store_root}/current"
+  local current_version=""
+
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] \
+    || die "release package contains an invalid dashboard VERSION value: ${version}"
+
+  if [[ -L "$current_ptr" ]]; then
+    current_version="$(basename -- "$(readlink "$current_ptr")")"
+  elif [[ -f "$current_ptr" ]]; then
+    current_version="$(tr -d '[:space:]' <"$current_ptr")"
+  fi
+
+  if [[ -n "$current_version" && "$current_version" != "$version" ]] \
+    && ! dpkg --compare-versions "$version" gt "$current_version"; then
+    warn "bundled dashboard ${version} is not newer than active dashboard ${current_version}; leaving the active version unchanged"
+    return 0
+  fi
+
+  runuser -u "$QRX_SERVICE_USER" -- mkdir -p "$store_root" "${store_root}/releases"
+  if [[ ! -f "${release_dir}/index.html" ]]; then
+    local release_tmp="${store_root}/releases/.${version}.new.$$"
+    runuser -u "$QRX_SERVICE_USER" -- rm -rf "$release_tmp" "$release_dir"
+    runuser -u "$QRX_SERVICE_USER" -- mkdir -p "$release_tmp"
+    tar -C "$extracted_dashboard" -cf - . | runuser -u "$QRX_SERVICE_USER" -- tar -C "$release_tmp" -xf -
+    runuser -u "$QRX_SERVICE_USER" -- mv -Tf "$release_tmp" "$release_dir"
+  fi
+
+  if [[ -z "$current_version" ]]; then
+    runuser -u "$QRX_SERVICE_USER" -- ln -s "releases/${version}" "$current_ptr"
+  elif [[ "$current_version" != "$version" ]]; then
+    runuser -u "$QRX_SERVICE_USER" -- ln -sfn "releases/${current_version}" "${store_root}/.previous.new"
+    runuser -u "$QRX_SERVICE_USER" -- mv -Tf "${store_root}/.previous.new" "${store_root}/previous"
+    runuser -u "$QRX_SERVICE_USER" -- ln -sfn "releases/${version}" "${store_root}/.current.new"
+    runuser -u "$QRX_SERVICE_USER" -- mv -Tf "${store_root}/.current.new" "$current_ptr"
+    info "advanced installed Dashboard from ${current_version} to ${version}"
+  fi
+}
+
 install_release() {
   local tarball="${WORKDIR}/${ASSET_NAME}"
   local extract_dir="${WORKDIR}/extracted"
@@ -679,6 +725,7 @@ install_release() {
     rm -rf "${QRX_PREFIX}/dashboard"
     mkdir -p "${QRX_PREFIX}/dashboard"
     cp -a "${extract_dir}/dashboard/." "${QRX_PREFIX}/dashboard/"
+    bootstrap_dashboard_ota_store "${extract_dir}/dashboard" "$ota_version"
   else
     warn "release package has no dashboard/ directory -- the web dashboard will not be available until you install one (see docs/development.md)."
   fi
