@@ -28,6 +28,10 @@ type Poller struct {
 	Alerts     *alerts.Engine
 	Interval   time.Duration
 	Logger     *slog.Logger
+	// CoreProcessRunning checks the actual service supervisor state. Adapter
+	// selection only proves that a compatible client exists; it does not prove
+	// qrxd is running.
+	CoreProcessRunning func(context.Context) bool
 
 	lastSuccess time.Time
 }
@@ -72,8 +76,12 @@ func (p *Poller) tick(ctx context.Context) {
 	if active != nil {
 		adapterHealthy = active.Health(ctx) == nil
 	}
+	coreRunning := active != nil
+	if p.CoreProcessRunning != nil {
+		coreRunning = p.CoreProcessRunning(ctx)
+	}
 	state := p.Guardian.Evaluate(ctx, guardian.Signals{
-		QRXProcessRunning:  active != nil,
+		QRXProcessRunning:  coreRunning,
 		NodeOnline:         snap.Node.Online,
 		AdapterHealthy:     adapterHealthy,
 		LastSuccessfulPoll: p.lastSuccess,

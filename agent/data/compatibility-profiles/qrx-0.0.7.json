@@ -32,8 +32,8 @@
   "required_adapter": "qrx007",
   "optional_features": [],
   "known_bugs": [],
-  "platform_notes": "UNVERIFIED: this profile is transcribed from the QRX 0.0.7 public branch's documented command list (see docs/qrx-0.0.7-interface.md). Exact JSON response field names, error shapes, network/wallet selection flags, and RPC vs. CLI-forwarding transport have not yet been confirmed against QRX 0.0.7 source or a running node. Do not treat known_cli_commands as a guarantee of response schema -- agent/adapters/qrx007 must degrade individual fields to Unavailable rather than assume a shape.",
-  "min_recommended_suite_version": "0.1.0",
+  "platform_notes": "Verified against phoenixkonsole/qrx branch 0.0.7 commit 4a732c1a7d2b03fb299eabde437646c99c797e2d and a native Linux daemon linked with OpenSSL 3.6.4. RPC responses use an ok/method/result envelope. The bundled qrx-cli carries a read-only patch to prevent it racing qrxd by rewriting chain and wallet state.",
+  "min_recommended_suite_version": "0.2.0",
   "core_version_switch_safety": {
     "blockchain_data": "",
     "configuration": "",

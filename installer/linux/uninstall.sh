@@ -41,6 +41,7 @@ QRX_CORE_MARKER="${QRX_CONFIG_DIR}/qrx-core-installed-by-this-installer"
 # following any symlinks) to this root or somewhere underneath it --
 # never "/", "/etc", a symlink escape, or anything else.
 QRX_CORE_INSTALL_ROOT="${QRX_CORE_INSTALL_ROOT:-/opt/qrx}"
+QRX_CORE_UNIT_FILE="${QRX_CORE_UNIT_FILE:-/etc/systemd/system/qrxd.service}"
 
 PURGE_DATA=0
 REMOVE_QRX_CORE=0
@@ -202,7 +203,18 @@ remove_qrx_core() {
   case "$status" in
     0)
       if confirm "Remove the QRX Core installation that install.sh set up (${target})? (blockchain data and wallet are NEVER removed by this script, regardless)"; then
+        systemctl stop qrxd.service 2>/dev/null || true
+        systemctl disable qrxd.service 2>/dev/null || true
+        rm -f "$QRX_CORE_UNIT_FILE"
+        for link in /usr/local/bin/qrx /usr/local/bin/qrxd /usr/local/bin/qrx-cli /opt/qrx/current; do
+          if [[ -L "$link" ]]; then
+            local resolved_link
+            resolved_link="$(readlink -f "$link" 2>/dev/null || true)"
+            case "$resolved_link" in "$target"/*) rm -f "$link" ;; esac
+          fi
+        done
         rm -rf "$target"
+        systemctl daemon-reload 2>/dev/null || true
         echo "  - removed ${target}"
       else
         echo "  - kept QRX Core (confirmation declined)"

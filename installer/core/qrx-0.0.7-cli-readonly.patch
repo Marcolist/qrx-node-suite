@@ -1,0 +1,31 @@
+diff --git a/qrx-core/src/qrx_cli.c b/qrx-core/src/qrx_cli.c
+index 5760a9f..a361c98 100644
+--- a/qrx-core/src/qrx_cli.c
++++ b/qrx-core/src/qrx_cli.c
+@@ -243 +243 @@ int main(int argc,char **argv){
+-    char base[PATH_MAX], cdir[PATH_MAX], wdir[PATH_MAX], ndir[PATH_MAX], sock[PATH_MAX];
++    char sock[PATH_MAX];
+@@ -260 +260,4 @@ int main(int argc,char **argv){
+-    if(qrx_ensure_node(network,datadir,wallet,NULL,NULL,0,base,sizeof(base),cdir,sizeof(cdir),wdir,sizeof(wdir),ndir,sizeof(ndir))!=0){ fprintf(stderr,"qrx-cli: failed to initialize\n"); return 1; }
++    /* qrx-cli is an RPC client. Initializing or rewriting chain and wallet
++       state here races qrxd during first boot and grants monitoring users
++       needless write access to consensus and wallet directories. */
++    (void)datadir; (void)wallet;
+@@ -467 +470,7 @@ int main(int argc,char **argv){
+-    if(socket_call(sock, cmd, out, sizeof(out)) == 0){ fputs(out, stdout); return 0; }
++    if(socket_call(sock, cmd, out, sizeof(out)) == 0){
++        /* qrxd returns structured errors, including HTTP 401, in the body.
++           Propagate them as a failing CLI invocation so service monitors do
++           not report an unauthorized node as healthy. */
++        if(strstr(out, "\"ok\":false")){ fputs(out, stderr); return 1; }
++        fputs(out, stdout); return 0;
++    }
+diff --git a/qrx-core/src/qrxd.c b/qrx-core/src/qrxd.c
+index f30fdeb..12c2da4 100644
+--- a/qrx-core/src/qrxd.c
++++ b/qrx-core/src/qrxd.c
+@@ -1818,0 +1819,4 @@ int main(int argc, char **argv){
++    const char *rpc_user_env = getenv("QRX_RPC_USER");
++    const char *rpc_password_env = getenv("QRX_RPC_PASSWORD");
++    if(!g_rpc_user[0] && rpc_user_env) snprintf(g_rpc_user,sizeof(g_rpc_user),"%s",rpc_user_env);
++    if(!g_rpc_password[0] && rpc_password_env) snprintf(g_rpc_password,sizeof(g_rpc_password),"%s",rpc_password_env);

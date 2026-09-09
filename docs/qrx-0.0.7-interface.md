@@ -1,102 +1,52 @@
 # QRX 0.0.7 interface notes
 
-**Status: UNVERIFIED.** This document exists to make the boundary between
-"confirmed" and "assumed" explicit, per docs/architecture.md principle 11 and
-CONTRIBUTING.md. Nothing in this file should be read as a specification of
-QRX 0.0.7's actual behavior.
+**Verified source:** `phoenixkonsole/qrx` branch `0.0.7`, commit
+`4a732c1a7d2b03fb299eabde437646c99c797e2d`.
 
-## Why this is unverified
+The release pipeline builds Core with statically linked OpenSSL 3.6.4. QRX needs
+OpenSSL 3.5 or newer for ML-DSA-65; Ubuntu 22.04/24.04 and Debian 12 do not meet
+that requirement with their system OpenSSL.
 
-`agent/adapters/qrx007` was written in an environment with:
+`qrx-cli` accepts separate long options:
 
-- No copy of the QRX Core source tree.
-- No running `qrxd`/`qrx-cli` to execute commands against and observe real
-  output.
-- No outbound network access to fetch either of the above (this sandbox's
-  egress policy blocks arbitrary hosts; see the repository's own network
-  notes if you're reading this from a similar environment).
-
-The only input available was the command name list from the product
-specification this repository was built against (reproduced below and in
-`agent/data/compatibility-profiles/qrx-0.0.7.json`). Field names, response
-envelopes, error formats, and transport details are **not confirmed**.
-
-## What is claimed to be true (the command list)
-
-QRX 0.0.7 is documented to expose these commands, presumably via `qrx-cli`
-forwarding to `qrxd` (transport not confirmed — see below):
-
-```
-getnodestatus          getvalidatorstatus       getnewaddress
-getblockchaininfo       getblockproducerinfo      listaddresses
-getnetworkinfo          getfeeinfo                 getaddressnonce
-getuptime               getwalletinfo               sendrawtransaction
-getbuildinfo            getnoncelanes               getvelocityinfo
-getmempoolinfo           getrecentblocks             createvelocitytransaction
-                          getrecenttransactions
+```text
+qrx-cli --network alpha --datadir /var/lib/qrx --wallet node getnodestatus
 ```
 
-## What is NOT confirmed
+It connects by HTTP to the loopback RPC port selected by the network profile:
+mainnet 37660, alpha 37661, testnet 37662, and regtest 37663. Credentials come
+from `QRX_RPC_USER` and `QRX_RPC_PASSWORD`. Successful replies use this envelope:
 
-- **Exact JSON field names** for any command's response. `agent/qrx/fields.go`
-  and `agent/adapters/qrx007` deliberately try multiple plausible key names
-  (e.g. `"height"`, `"blocks"`, `"block_height"`) and fall back to
-  `models.Unavailable` rather than assume one is correct.
-- **Whether responses are JSON at all**, and if so, whether they're a bare
-  object, wrapped in a `result`/`data` envelope, or JSON-RPC shaped
-  (`{"result": ..., "error": ...}`).
-- **Error format**: what `qrx-cli` prints on a bad command, a node that's
-  still syncing, a missing wallet, etc. `agent/qrx.CommandError.UnknownCommand()`
-  is a heuristic guess at recognizing "command doesn't exist," not a
-  confirmed match against real stderr text.
-- **Transport**: whether `qrx-cli` talks to `qrxd` over a local RPC/HTTP
-  port, a Unix domain socket, or forwards to some other local control
-  interface. `agent/qrx.Runner` currently only shells out to a `qrx-cli`
-  binary (`docs/architecture.md`'s "QRX command execution" section);
-  direct-RPC support is not implemented.
-- **Network/wallet selection flags**: `-network=`, `-datadir=`, `-wallet=` in
-  `agent/qrx/config.go` are a guess at conventional Bitcoin-derivative CLI
-  flag naming, not confirmed against QRX 0.0.7's actual flag names.
-- **Validator/VELOCITY response shapes**: `getvalidatorstatus`,
-  `getblockproducerinfo`, `getvelocityinfo`, `getnoncelanes` responses are
-  entirely unverified; the fields `agent/models` defines for them
-  (`ValidatorStatus`, `BlockProducerStatus`, `VelocityStatus`, `NonceLanes`)
-  are a reasonable guess at what such an engine would report, not a
-  transcription of real output.
+```json
+{"ok":true,"method":"getnodestatus","result":{"network":"alpha","local_height":0}}
+```
 
-## What this means for the codebase
+Confirmed status methods include `getbuildinfo`, `getnodestatus`,
+`getblockchaininfo`, `getnetworkinfo`, `getuptime`, `getmempoolinfo`,
+`getrecentblocks`, `getrecenttransactions`, `getvalidatorstatus`,
+`getblockproducerinfo`, `getfeeinfo`, `getwalletinfo`, `getvelocityinfo`, and
+`getnoncelanes <address>`. Recent lists are nested under `result.blocks` and
+`result.transactions`; validator state is nested under `result.staking`.
 
-`agent/adapters/qrx007` is written defensively specifically because of the
-above:
+The upstream CLI calls `qrx_ensure_node()` before every RPC request. That writes
+chain configuration and can create a wallet, causing a reproducible race with a
+freshly starting daemon (`read genesis hash failed`). The Suite release applies
+`installer/core/qrx-0.0.7-cli-readonly.patch`: the CLI only connects to RPC and
+never initializes local state. Ten consecutive clean daemon starts passed after
+this patch; the unpatched build failed intermittently during concurrent startup.
 
-1. Every field extraction goes through `agent/qrx.Str`/`Int64`/`Int`/`Bool`,
-   which try several plausible key names and degrade to
-   `models.Unavailable` (never a zero value, never a panic) when none match.
-2. Optional command groups (`getvalidatorstatus`, `getblockproducerinfo`,
-   `getvelocityinfo`, `getnoncelanes`) are runtime-capability-probed
-   (`Adapter.Capabilities`) rather than assumed present just because the
-   detected QRX Core version is 0.0.7 — see
-   `docs/architecture.md#feature-capability-detection`.
-3. `agent/data/compatibility-profiles/qrx-0.0.7.json`'s `platform_notes`
-   field and `core_version_switch_safety` block are explicitly left as
-   "unverified" / unknown, which makes `version.SwitchSafety.AllKnown()`
-   false and therefore blocks any automatic QRX Core version switch onto
-   0.0.7 until a human confirms it (`docs/updates.md#core-version-switching-safety`).
+The upstream daemon accepts `--rpc-user` and `--rpc-password` but, unlike its
+CLI, does not read the documented `QRX_RPC_USER` and `QRX_RPC_PASSWORD`
+environment variables. Passing secrets as service command-line arguments exposes
+them through process metadata. The Suite patch adds the missing daemon-side
+environment lookup so systemd can load both credentials from a root-only file.
 
-## What must happen before this is trustworthy
+The upstream CLI also exits successfully for structured RPC failures because it
+discards the HTTP status and treats every completed TCP exchange as success. The
+Suite patch returns a nonzero exit code when the response contains
+`"ok":false`, so bad credentials and RPC errors cannot pass health checks.
 
-Before running `agent/adapters/qrx007` against a real validator:
-
-1. Get access to QRX 0.0.7 source (or a running `qrxd`) and run each command
-   above, capturing real request/response pairs.
-2. Update this document with confirmed field names, error shapes, and
-   transport details, citing the source location or command transcript.
-3. Tighten `agent/adapters/qrx007`'s field extraction to the confirmed key
-   names (keep the multi-key fallback only where the field name has
-   genuinely changed between point releases).
-4. Fill in `agent/data/compatibility-profiles/qrx-0.0.7.json`'s
-   `core_version_switch_safety` block with real compatible/incompatible
-   judgements once tested, so automatic switching can be enabled for that
-   specific transition.
-5. Remove this "UNVERIFIED" banner and replace it with confirmed interface
-   documentation.
+The public network described by the Core README is `alpha` on P2P port 26661.
+The `mainnet` profile is named “QRX Mainnet Preview” and contains no seed nodes.
+Only `seed1.qrxchain.org` currently resolves; reachability and a nonzero peer count
+must be checked separately from process health.

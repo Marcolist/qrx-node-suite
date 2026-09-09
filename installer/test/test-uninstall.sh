@@ -116,6 +116,10 @@ QRX_DATA_DIR="${test_root}/var/lib/qrx-node-suite"
 QRX_LOG_DIR="${test_root}/var/log/qrx-node-suite"
 QRX_CORE_INSTALL_ROOT="${test_root}/opt/qrx"
 QRX_CORE_MARKER="${QRX_CONFIG_DIR}/qrx-core-installed-by-this-installer"
+QRX_CORE_UNIT_FILE="${test_root}/etc/systemd/system/qrxd.service"
+# remove_qrx_core manages the service in production. Keep this pure-function
+# test from talking to the host's real systemd instance.
+systemctl() { return 0; }
 # shellcheck disable=SC2034
 PURGE_DATA=1
 # shellcheck disable=SC2034

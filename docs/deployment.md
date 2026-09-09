@@ -60,7 +60,8 @@ linux/arm64 (see that workflow's comments on why *natively*, on the oldest
 supported glibc, rather than cross-compiling -- `agent/storage/sqlite` is cgo),
 builds the dashboard (`npm ci && npm run build`), and packages each
 architecture as `qrx-node-suite_<version>_linux_<arch>.tar.gz` (`agentd` +
-`dashboard/` + `uninstall.sh` + `LICENSE` + `VERSION`, no wrapping directory --
+`dashboard/` + the pinned QRX Core binaries and provenance metadata under `core/` +
+`uninstall.sh` + `LICENSE` + `VERSION`, no wrapping directory --
 this is what `install.sh` downloads). It generates `SHA256SUMS`, signs it with
 `agent/cmd/sign-checksums` if the `RELEASE_SIGNING_PRIVATE_KEY` repo secret is
 set (see [Signing keys](#signing-keys) below), and publishes everything as a
@@ -75,13 +76,17 @@ compatible follow-up, not required for the current release process to work.
 To build a release tarball by hand (matching what CI does):
 
 ```sh
-cd agent && go build -ldflags "-X main.suiteVersion=0.1.0 -X main.agentVersion=0.1.0 -X main.dashboardVersion=0.1.0" -o ../agentd ./cmd/agentd
+git clone --branch 0.0.7 https://github.com/phoenixkonsole/qrx.git qrx-core-source
+git -C qrx-core-source checkout 4a732c1a7d2b03fb299eabde437646c99c797e2d
+installer/build-qrx-core-linux.sh qrx-core-source core-dist
+cd agent && go build -ldflags "-X main.suiteVersion=0.2.0 -X main.agentVersion=0.2.0 -X main.dashboardVersion=0.2.0" -o ../agentd ./cmd/agentd
 cd dashboard && npm ci && npm run build && cd ..
-mkdir -p pkg/dashboard
+mkdir -p pkg/dashboard pkg/core
 cp agentd pkg/agentd && cp -a dashboard/dist/. pkg/dashboard/
+cp -a core-dist/. pkg/core/
 cp LICENSE installer/linux/uninstall.sh installer/qrx-core-sources.sh pkg/
-echo 0.1.0 > pkg/VERSION
-tar -czf qrx-node-suite_0.1.0_linux_amd64.tar.gz -C pkg .
+echo 0.2.0 > pkg/VERSION
+tar -czf qrx-node-suite_0.2.0_linux_amd64.tar.gz -C pkg .
 ```
 
 ## SQLite runtime dependency

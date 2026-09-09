@@ -1,7 +1,9 @@
 package qrx
 
 import (
+	"bytes"
 	"encoding/json"
+	"strconv"
 
 	"qrx-node-suite/agent/models"
 )
@@ -17,7 +19,29 @@ func Fields(raw []byte) (map[string]json.RawMessage, error) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, err
 	}
+	// QRX Core 0.0.7 wraps successful RPC replies as
+	// {"ok":true,"method":"...","result":{...}}. Older development
+	// builds returned the fields directly, so accept both forms.
+	if result, ok := m["result"]; ok {
+		var nested map[string]json.RawMessage
+		if err := json.Unmarshal(result, &nested); err == nil && nested != nil {
+			return nested, nil
+		}
+	}
 	return m, nil
+}
+
+// Result returns the JSON value inside QRX Core 0.0.7's result envelope.
+// It also accepts an unwrapped value for compatibility with earlier builds.
+func Result(raw []byte) ([]byte, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, err
+	}
+	if result, ok := envelope["result"]; ok {
+		return result, nil
+	}
+	return raw, nil
 }
 
 // Str extracts a string field, trying each key in order.
@@ -30,6 +54,13 @@ func Str(fields map[string]json.RawMessage, keys ...string) models.Value[string]
 		var s string
 		if err := json.Unmarshal(raw, &s); err == nil {
 			return models.Avail(s)
+		}
+		// Several 0.0.7 RPC fields (for example protocolversion) are JSON
+		// numbers while the dashboard model represents them as text.
+		if n := bytes.TrimSpace(raw); len(n) > 0 {
+			if _, err := strconv.ParseFloat(string(n), 64); err == nil {
+				return models.Avail(string(n))
+			}
 		}
 	}
 	return models.Unavail[string]("field not present in qrx-cli response")

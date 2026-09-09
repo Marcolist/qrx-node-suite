@@ -22,6 +22,8 @@ QRX_REPO_NAME="${QRX_REPO_NAME:-qrx-node-suite}"
 QRX_CHANNEL="${QRX_CHANNEL:-stable}"                # stable | beta
 QRX_VERSION="${QRX_VERSION:-latest}"                # "latest" or an exact tag like v0.1.0
 QRX_INSTALL_QRX_CORE="${QRX_INSTALL_QRX_CORE:-auto}" # auto | skip
+QRX_CORE_NETWORK="${QRX_CORE_NETWORK:-alpha}"         # alpha | testnet | regtest | mainnet
+QRX_CORE_EXTERNAL_HOST="${QRX_CORE_EXTERNAL_HOST:-}"  # advertised P2P address; auto-detected when empty
 QRX_DASHBOARD_BIND="${QRX_DASHBOARD_BIND:-local}"   # local | lan
 QRX_VERBOSE="${QRX_VERBOSE:-0}"
 QRX_PREFIX="${QRX_PREFIX:-/opt/qrx-node-suite}"
@@ -708,11 +710,35 @@ bootstrap_dashboard_ota_store() {
   fi
 }
 
+validate_release_archive() {
+  local tarball="$1" entry normalized type
+  # Release artifacts are signed, but extraction still runs as root. Refuse
+  # archive features that could write outside the private extraction tree or
+  # redirect later installer reads through links.
+  if ! tar -tzf "$tarball" | while IFS= read -r entry; do
+    normalized="$entry"
+    while [[ "$normalized" == ./* ]]; do normalized="${normalized#./}"; done
+    [[ -z "$normalized" || "$normalized" == "." ]] && continue
+    case "$normalized" in /*) echo "unsafe absolute archive path: ${entry}" >&2; return 1 ;; esac
+    case "/${normalized}/" in */../*) echo "unsafe parent archive path: ${entry}" >&2; return 1 ;; esac
+  done; then
+    die "release archive contains an unsafe path or could not be inspected"
+  fi
+
+  if ! tar -tvzf "$tarball" | cut -c1 | while IFS= read -r type; do
+    case "$type" in -|d) ;; *) return 1 ;; esac
+  done; then
+    die "release archive contains a link or special file"
+  fi
+}
+
 install_release() {
   local tarball="${WORKDIR}/${ASSET_NAME}"
   local extract_dir="${WORKDIR}/extracted"
   mkdir -p "$extract_dir"
-  tar -xzf "$tarball" -C "$extract_dir"
+  validate_release_archive "$tarball"
+  tar --extract --gzip --file "$tarball" --directory "$extract_dir" \
+    --no-same-owner --no-same-permissions --delay-directory-restore
 
   [[ -f "${extract_dir}/agentd" ]] || die "release package is missing the agentd binary -- this looks like a broken/incomplete release artifact."
 
@@ -771,8 +797,31 @@ install_release() {
 # ============================================================
 QRX_CLI_PATH=""
 QRX_CORE_STATE="not_installed" # not_installed | detected
+QRX_CORE_DATA_DIR=""
+QRX_CORE_NETWORK_ACTIVE=""
+QRX_CORE_WALLET_NAME=""
+QRX_CORE_CONFIGURE_AGENT=0
+QRX_CORE_RECOVERY_CREATED=0
 
 detect_qrx_core() {
+  local sources_script="${WORKDIR}/extracted/qrx-core-sources.sh"
+  local managed_marker="${QRX_CONFIG_DIR}/qrx-core-installed-by-this-installer"
+  # A Core previously installed by this installer must follow the newly
+  # verified bundle on a reinstall. Treating its qrx-cli as merely an
+  # external pre-existing binary would permanently bypass Core fixes.
+  if [[ "$QRX_INSTALL_QRX_CORE" != "skip" && -f "$managed_marker" && -f "$sources_script" ]]; then
+    # shellcheck disable=SC1090
+    . "$sources_script"
+    if declare -f qrx_core_official_source >/dev/null 2>&1 && qrx_core_official_source "$GOARCH" "${WORKDIR}"; then
+      QRX_CORE_STATE="detected"
+      QRX_CLI_PATH="${QRX_CORE_INSTALLED_CLI_PATH:-}"
+      QRX_CORE_CONFIGURE_AGENT=1
+      ok "updated the installer-managed QRX Core from the verified release bundle"
+      return 0
+    fi
+    die "the installer-managed QRX Core could not be updated from the verified release bundle"
+  fi
+
   local candidates=(
     "$(command -v qrx-cli 2>/dev/null || true)"
     "/usr/local/bin/qrx-cli"
@@ -799,29 +848,23 @@ detect_qrx_core() {
     return 0
   fi
 
-  # There is deliberately no bundled QRX Core download source: this
-  # installer must never invent an official QRX Core release URL (see
-  # docs/installer.md#qrx-core). installer/qrx-core-sources.sh (shipped
-  # inside the release tarball -- see .github/workflows/release.yml -- so
-  # this works the same whether install.sh was piped or run from a local
-  # checkout) is the extension point a maintainer wires up once an
-  # official, verifiable binary source exists; until then this always
-  # reports "unavailable" and QRX Node Suite installs successfully
-  # without it.
-  local sources_script="${WORKDIR}/extracted/qrx-core-sources.sh"
+  # Official suite releases contain Core binaries built from a pinned
+  # phoenixkonsole/qrx commit. The outer signed release checksum already
+  # authenticates those bytes; the sourced helper additionally checks the
+  # embedded source/OpenSSL metadata before installing anything.
   if [[ -f "$sources_script" ]]; then
     # shellcheck disable=SC1090
     . "$sources_script"
     if declare -f qrx_core_official_source >/dev/null 2>&1 && qrx_core_official_source "$GOARCH" "${WORKDIR}"; then
       QRX_CORE_STATE="detected"
       QRX_CLI_PATH="${QRX_CORE_INSTALLED_CLI_PATH:-}"
+      QRX_CORE_CONFIGURE_AGENT=1
       ok "installed QRX Core from the configured official source"
       return 0
     fi
   fi
 
-  info "QRX Core was not installed because no verified, official QRX Core binary source is currently configured."
-  info "QRX Node Suite installed successfully without it -- you can install or connect QRX Core later from the Dashboard."
+  die "QRX Core installation was requested but the verified release contains no usable Core 0.0.7 bundle. Use QRX_INSTALL_QRX_CORE=skip only when intentionally connecting an existing Core yourself."
 }
 
 # ============================================================
@@ -847,6 +890,29 @@ write_config() {
   install -d -m 0750 -o root -g "$QRX_SERVICE_USER" "$QRX_CONFIG_DIR"
 
   if [[ -f "$config_file" ]]; then
+    if [[ "$QRX_CORE_CONFIGURE_AGENT" == "1" ]]; then
+      local patched="${config_file}.new.$$"
+      if jq \
+        --arg cli "$QRX_CLI_PATH" \
+        --arg datadir "$QRX_CORE_DATA_DIR" \
+        --arg network "$QRX_CORE_NETWORK_ACTIVE" \
+        --arg wallet "$QRX_CORE_WALLET_NAME" \
+        '.adapter.name = ""
+         | .adapter.manual_override = false
+         | .adapter.cli_path = $cli
+         | .adapter.data_dir = $datadir
+         | .adapter.network = $network
+         | .adapter.wallet_name = $wallet
+         | .adapter.assumed_qrx_core_version = "0.0.7"' \
+        "$config_file" >"$patched"; then
+        install -o root -g "$QRX_SERVICE_USER" -m 0640 "$patched" "$config_file"
+        rm -f "$patched"
+        ok "connected the existing Agent configuration to the bundled QRX Core"
+      else
+        rm -f "$patched"
+        die "existing ${config_file} is not valid JSON; refusing to overwrite it while connecting QRX Core"
+      fi
+    fi
     chown "root:${QRX_SERVICE_USER}" "$config_file"
     chmod 0640 "$config_file"
     info "existing config found at ${config_file} -- leaving it untouched"
@@ -861,6 +927,8 @@ write_config() {
   fi
 
   local adapter_name="" adapter_cli_path="/usr/local/bin/qrx-cli"
+  local adapter_data_dir="${QRX_CORE_DATA_DIR:-}" adapter_network="${QRX_CORE_NETWORK_ACTIVE:-$QRX_CORE_NETWORK}"
+  local adapter_wallet="${QRX_CORE_WALLET_NAME:-node}"
   if [[ -n "$QRX_CLI_PATH" ]]; then
     adapter_cli_path="$QRX_CLI_PATH"
     # adapter_name deliberately left empty: automatic selection
@@ -880,7 +948,9 @@ write_config() {
     "name": "${adapter_name}",
     "manual_override": false,
     "cli_path": "${adapter_cli_path}",
-    "network": "mainnet",
+    "data_dir": "${adapter_data_dir}",
+    "network": "${adapter_network}",
+    "wallet_name": "${adapter_wallet}",
     "assumed_qrx_core_version": "0.0.7"
   },
   "admin_token": "${ADMIN_TOKEN}",
@@ -951,12 +1021,18 @@ SUDOERS
 # ============================================================
 install_systemd_service() {
   local unit_file="/etc/systemd/system/qrx-agent.service"
+  local core_after="" core_wants="" core_environment=""
+  if [[ "$QRX_CORE_STATE" == "detected" && -f /etc/systemd/system/qrxd.service ]]; then
+    core_after=" qrxd.service"
+    core_wants=" qrxd.service"
+    core_environment="EnvironmentFile=-/etc/qrx-core/rpc.env"
+  fi
   cat >"$unit_file" <<UNIT
 [Unit]
 Description=QRX Node Suite Agent
 Documentation=https://github.com/${QRX_REPO_OWNER}/${QRX_REPO_NAME}
-After=network-online.target
-Wants=network-online.target
+After=network-online.target${core_after}
+Wants=network-online.target${core_wants}
 # Complements agentd's own in-process crash-loop guard (BootGuard,
 # agent/updates/bootguard.go, 3 failed boots by default): BootGuard can only
 # act once a new binary's Go runtime actually starts running, so it can
@@ -976,6 +1052,7 @@ StartLimitBurst=8
 Type=simple
 User=${QRX_SERVICE_USER}
 Group=${QRX_SERVICE_USER}
+${core_environment}
 ExecStart=${QRX_PREFIX}/bin/agentd -config ${QRX_CONFIG_DIR}/agent.json
 WorkingDirectory=${QRX_PREFIX}
 Restart=always
@@ -1184,7 +1261,7 @@ print_summary() {
     printf "  %-18s%s\n" "QRX Core" "CONNECTED"
     printf "  %-18s%s\n" "QRX Version" "$reported_qrx_version"
     printf "  %-18s%s\n" "Adapter" "${reported_adapter:-unknown}"
-    printf "  %-18s%s\n" "Network" "mainnet"
+    printf "  %-18s%s\n" "Network" "${QRX_CORE_NETWORK_ACTIVE:-$QRX_CORE_NETWORK}"
   else
     printf "  %-18s%s\n" "QRX Core" "NOT INSTALLED"
     printf "  %-18s%s\n" "Adapter" "WAITING"
@@ -1192,6 +1269,14 @@ print_summary() {
     echo "  Open the Dashboard to complete QRX Core setup."
   fi
   echo ""
+  if [[ "$QRX_CORE_RECOVERY_CREATED" == "1" ]]; then
+    echo "Wallet recovery backup (root-only):"
+    echo "  /etc/qrx-core/recovery.txt"
+    echo "  /etc/qrx-core/recovery.qrxseed"
+    echo "Copy both files to safe offline storage, then delete these server copies."
+    echo "Their secret contents were not written to the installer log or system journal."
+    echo ""
+  fi
   if [[ "$QRX_DASHBOARD_BIND" != "lan" ]]; then
     echo "The Dashboard is only reachable from this machine right now. To allow"
     echo "access from your local network, edit ${QRX_CONFIG_DIR}/agent.json's"

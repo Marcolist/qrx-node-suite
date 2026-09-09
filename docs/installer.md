@@ -80,27 +80,28 @@ matters if you're inspecting the filesystem directly.
 
 ## QRX Core
 
-`install.sh` **never invents a QRX Core download URL**. There is currently no
-official, checksummed QRX Core binary release this project can point to, so by
-default it only *detects* an existing installation (checking `PATH` and
-`/usr/local/bin`, `/opt/qrx/current/bin`, `/opt/qrx/bin`, `/usr/bin`) -- it never
-overwrites one it finds. If nothing is found:
+Official Node Suite releases include `qrx`, `qrxd`, and `qrx-cli` built from the
+pinned `phoenixkonsole/qrx` 0.0.7 commit recorded in the release package. The
+release workflow builds OpenSSL 3.6.4 from its verified upstream source checksum
+and links it statically, because distro OpenSSL versions do not provide the
+ML-DSA support QRX requires. The signed Node Suite tarball authenticates the Core
+binaries, their source metadata, and the exact suite patch hash as one release unit.
 
-> QRX Node Suite installed successfully.
-> QRX Core was not installed because no verified, official QRX Core binary source
-> is currently configured. You can install or connect QRX Core later from the
-> Dashboard.
+With `QRX_INSTALL_QRX_CORE=auto`, Core is mandatory: a missing or invalid Core
+bundle fails the installation. `skip` is an explicit opt-out for operators who
+manage Core themselves. A pre-existing `qrx-cli` is detected and retained.
 
-The Agent's own adapter auto-selection (`agent/adapters.Registry.SelectAutomatic`)
-then correctly reports "unsupported" / waiting rather than silently pretending to
-be connected with the Mock adapter -- the config `install.sh` writes leaves
-`adapter.name` empty specifically so this stays true automatically as QRX Core
-compatibility evolves, rather than the installer hardcoding a guess.
+The installer creates the unprivileged `qrx-core` service, keeps RPC on loopback,
+generates separate RPC and wallet secrets, and starts `qrxd.service`. A new wallet
+is initialized before systemd starts so its recovery phrase never enters the
+system journal. The root-only backup files are:
 
-`installer/qrx-core-sources.sh` is the extension point a maintainer wires up once
-a real, official, checksummed QRX Core release exists (see the comments in that
-file). Until then it defines nothing, and `install.sh` treats that the same as
-"unavailable."
+- `/etc/qrx-core/recovery.txt`
+- `/etc/qrx-core/recovery.qrxseed`
+
+Copy both to offline storage and remove the server-side copies afterward. The
+public Alpha network is the default because 0.0.7 labels mainnet as a preview and
+ships no mainnet seeds. `QRX_CORE_NETWORK` can select another profile explicitly.
 
 ## Admin token
 
@@ -318,6 +319,8 @@ The default command needs none of these -- they're for advanced/scripted use.
 | `QRX_CHANNEL` | `stable` | `stable` or `beta` |
 | `QRX_VERSION` | `latest` | `latest`, or an exact tag like `v0.1.0` |
 | `QRX_INSTALL_QRX_CORE` | `auto` | `auto` or `skip` |
+| `QRX_CORE_NETWORK` | `alpha` | `alpha`, `testnet`, `regtest`, or the seedless `mainnet` preview |
+| `QRX_CORE_EXTERNAL_HOST` | detected primary IP | Address advertised to P2P peers; set this to the router's public address for a port-forwarded home server |
 | `QRX_DASHBOARD_BIND` | `local` | `local` (127.0.0.1) or `lan` (0.0.0.0) |
 | `QRX_VERBOSE` | `0` | `1` for verbose step output |
 | `QRX_PREFIX` | `/opt/qrx-node-suite` | Install prefix |
@@ -340,9 +343,10 @@ rather than attempting an incompatible install.
 
 ## Firewall
 
-`install.sh` never modifies firewall rules. If QRX Core needs a P2P port open,
-that's between you and QRX Core's own documentation -- out of this project's
-boundary (`docs/architecture.md`). The Dashboard/admin port is bound to `127.0.0.1`
+`install.sh` never modifies firewall rules. The bundled Core listens for P2P on
+`26661/tcp` for the default Alpha network (`26660` mainnet, `26662` testnet,
+`26663` regtest); the host and provider firewall must allow the selected port
+if inbound peers should reach it. The Dashboard/admin port is bound to `127.0.0.1`
 by default specifically so it is never publicly exposed by accident; see
 [Dashboard access](#dashboard-access) to change that deliberately.
 

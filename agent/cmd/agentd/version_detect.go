@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"strings"
 
 	"qrx-node-suite/agent/config"
 	"qrx-node-suite/agent/qrx"
@@ -24,8 +25,9 @@ func detectQRXCoreVersion(ctx context.Context, logger *slog.Logger, cfg config.C
 	if err == nil {
 		if fields, ferr := qrx.Fields(raw); ferr == nil {
 			if v := qrx.Str(fields, "version", "build_version"); v.Ok() {
-				logger.Info("detected QRX Core version via getbuildinfo", "version", v.Value)
-				return v.Value
+				normalized := normalizeQRXCoreVersion(v.Value)
+				logger.Info("detected QRX Core version via getbuildinfo", "version", v.Value, "compatibility_version", normalized)
+				return normalized
 			}
 		}
 	}
@@ -33,4 +35,15 @@ func detectQRXCoreVersion(ctx context.Context, logger *slog.Logger, cfg config.C
 	logger.Warn("could not detect QRX Core version from a live qrx-cli; falling back to the configured assumption -- this is NOT a confirmed detection",
 		"assumed_version", fallback, "probe_error", err)
 	return fallback
+}
+
+func normalizeQRXCoreVersion(v string) string {
+	v = strings.TrimSpace(v)
+	// The pinned 0.0.7 branch reports its feature track as a SemVer
+	// prerelease suffix. Compatibility is maintained for the branch's base
+	// release, which is also how its profile and adapter are versioned.
+	if strings.HasPrefix(v, "0.0.7-") {
+		return "0.0.7"
+	}
+	return v
 }

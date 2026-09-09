@@ -6,6 +6,8 @@
 // zero" (see docs/architecture.md, principle 11).
 package models
 
+import "encoding/json"
+
 // AvailabilityState describes whether a value is real, missing, unsupported by
 // the active adapter/QRX version, or failed to load.
 type AvailabilityState string
@@ -31,6 +33,23 @@ type Value[T any] struct {
 	State  AvailabilityState `json:"state"`
 	Value  T                 `json:"value,omitempty"`
 	Reason string            `json:"reason,omitempty"`
+}
+
+// MarshalJSON keeps unavailable values compact while preserving legitimate
+// available zero values. A plain omitempty tag cannot distinguish zero from
+// absent for a generic scalar.
+func (v Value[T]) MarshalJSON() ([]byte, error) {
+	type wireValue struct {
+		State  AvailabilityState `json:"state"`
+		Value  *T                `json:"value,omitempty"`
+		Reason string            `json:"reason,omitempty"`
+	}
+	w := wireValue{State: v.State, Reason: v.Reason}
+	if v.State == Available {
+		value := v.Value
+		w.Value = &value
+	}
+	return json.Marshal(w)
 }
 
 // Avail wraps a known value.

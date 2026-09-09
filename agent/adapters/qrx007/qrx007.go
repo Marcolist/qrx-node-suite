@@ -1,20 +1,14 @@
 // Package qrx007 wraps the QRX 0.0.7 command surface documented in
 // docs/qrx-0.0.7-interface.md.
 //
-// IMPORTANT: as recorded in that document, the exact JSON response shape for
-// each command has NOT been verified against QRX 0.0.7 source, a running
-// node, or an official RPC/CLI reference -- this sandbox had neither network
-// access to fetch the QRX source nor a running qrxd to inspect. Every method
-// here therefore parses defensively via agent/qrx's field helpers: known/
-// likely field names are attempted, and anything that doesn't decode as
-// expected degrades to models.Unavailable rather than panicking or guessing
-// a default. Before relying on this adapter against a real node, verify
-// field names per docs/qrx-0.0.7-interface.md and tighten the parsing here.
+// Response fields are based on the pinned phoenixkonsole/qrx 0.0.7 source
+// and are exercised against a real local daemon in release validation.
 package qrx007
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"qrx-node-suite/agent/adapters"
 	"qrx-node-suite/agent/models"
@@ -25,16 +19,17 @@ func init() {
 	adapters.Register("qrx007", func() adapters.Adapter { return New(qrx.Config{}) })
 }
 
-const adapterVersion = "1.0.0"
+const adapterVersion = "1.1.0"
 
 var supportedQRXVersions = []string{"0.0.7"}
 
 // Adapter wraps qrx-cli for a QRX 0.0.7 node via the centralized
 // qrx.Runner (agent/qrx), the only place allowed to spawn qrx-cli.
 type Adapter struct {
-	cfg    qrx.Config
-	runner *qrx.Runner
-	caps   map[string]bool
+	cfg           qrx.Config
+	runner        *qrx.Runner
+	caps          map[string]bool
+	walletAddress string
 }
 
 // New builds a qrx007 adapter with the given qrx-cli connection config.
@@ -87,7 +82,14 @@ func (a *Adapter) probeCapabilities(ctx context.Context) map[string]bool {
 	probe(adapters.CapBlockProducerInfo, "getblockproducerinfo")
 	probe(adapters.CapRecentBlocks, "getrecentblocks", "1")
 	probe(adapters.CapVelocity, "getvelocityinfo")
-	probe(adapters.CapNonceLanes, "getnoncelanes")
+	if raw, err := a.runner.Call(ctx, "getwalletinfo"); err == nil {
+		if fields, fieldErr := qrx.Fields(raw); fieldErr == nil {
+			if address := qrx.Str(fields, "address"); address.Ok() {
+				a.walletAddress = address.Value
+				probe(adapters.CapNonceLanes, "getnoncelanes", address.Value)
+			}
+		}
+	}
 	return caps
 }
 
@@ -111,20 +113,30 @@ func (a *Adapter) GetNodeStatus(ctx context.Context) (models.NodeStatus, error) 
 			AdapterName: a.Name(),
 		}, nil
 	}
-	var buildFields, uptimeFields map[string]json.RawMessage
+	var buildFields, uptimeFields, mempoolFields map[string]json.RawMessage
 	if buildInfo, err := a.runner.Call(ctx, "getbuildinfo"); err == nil {
 		buildFields, _ = qrx.Fields(buildInfo)
 	}
 	if uptime, err := a.runner.Call(ctx, "getuptime"); err == nil {
 		uptimeFields, _ = qrx.Fields(uptime)
 	}
+	if mempool, err := a.runner.Call(ctx, "getmempoolinfo"); err == nil {
+		mempoolFields, _ = qrx.Fields(mempool)
+	}
 
+	height := qrx.Int64(fields, "local_height", "height", "blocks", "block_height")
+	// Core reports 100% synchronized at height zero even when none of the
+	// configured peer addresses is connected. Without live peer telemetry,
+	// its best_peer_height/blocks_behind values cannot prove synchronization.
+	syncStatus := models.Unavail[models.SyncStatus]("QRX 0.0.7 cannot establish sync state without confirmed live peer telemetry")
 	return models.NodeStatus{
 		Online:            true,
 		Network:           qrx.Str(fields, "network", "chain"),
-		Height:            qrx.Int64(fields, "height", "blocks", "block_height"),
+		Height:            height,
 		FinalizedHeight:   qrx.Int64(fields, "finalized_height", "finalizedheight"),
-		MempoolTxCount:    qrx.Int64(fields, "mempool_size", "mempool_tx_count"),
+		Sync:              syncStatus,
+		Peers:             models.Unavail[models.PeerSummary]("QRX 0.0.7 reports configured peer entries, not confirmed live connections"),
+		MempoolTxCount:    qrx.Int64(mempoolFields, "txs", "size", "tx_count"),
 		QRXVersion:        qrx.Str(buildFields, "version", "build_version"),
 		NodeUptimeSeconds: qrx.Int64(uptimeFields, "uptime", "uptime_seconds"),
 		SimulationMode:    false,
@@ -141,10 +153,15 @@ func (a *Adapter) GetNetworkInfo(ctx context.Context) (models.NetworkStatus, err
 	if err != nil {
 		return models.NetworkStatus{}, err
 	}
+	network := models.Unavail[string]("network was not configured")
+	if a.cfg.Network != "" {
+		network = models.Avail(a.cfg.Network)
+	}
 	return models.NetworkStatus{
-		Network:         qrx.Str(fields, "network"),
-		PeerCount:       qrx.Int(fields, "peer_count", "connections"),
-		ProtocolVersion: qrx.Str(fields, "protocol_version"),
+		Network:         network,
+		PeerCount:       models.Unavail[int]("QRX 0.0.7 connections counts configured entries, not confirmed live peers"),
+		ProtocolVersion: qrx.Str(fields, "protocolversion", "protocol_version"),
+		ListenAddresses: models.Unavail[[]string]("QRX 0.0.7 reports only a listening boolean, not bound addresses"),
 	}, nil
 }
 
@@ -161,7 +178,7 @@ func (a *Adapter) GetBlockchainInfo(ctx context.Context) (models.BlockchainStatu
 		Network:         qrx.Str(fields, "network", "chain"),
 		Height:          qrx.Int64(fields, "height", "blocks"),
 		FinalizedHeight: qrx.Int64(fields, "finalized_height"),
-		BestBlockHash:   qrx.Str(fields, "best_block_hash", "bestblockhash"),
+		BestBlockHash:   qrx.Str(fields, "bestblockhash", "best_block_hash"),
 	}, nil
 }
 
@@ -175,7 +192,7 @@ func (a *Adapter) GetMempoolInfo(ctx context.Context) (models.MempoolStatus, err
 		return models.MempoolStatus{}, err
 	}
 	return models.MempoolStatus{
-		TxCount:   qrx.Int64(fields, "size", "tx_count"),
+		TxCount:   qrx.Int64(fields, "txs", "size", "tx_count"),
 		SizeBytes: qrx.Int64(fields, "bytes", "size_bytes"),
 	}, nil
 }
@@ -203,8 +220,16 @@ func (a *Adapter) GetRecentBlocks(ctx context.Context, limit int) ([]models.Rece
 	if err != nil {
 		return nil, err
 	}
+	result, err := qrx.Result(raw)
+	if err != nil {
+		return nil, err
+	}
+	var resultObject map[string]json.RawMessage
+	if err := json.Unmarshal(result, &resultObject); err != nil {
+		return nil, err
+	}
 	var entries []map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &entries); err != nil {
+	if err := json.Unmarshal(resultObject["blocks"], &entries); err != nil {
 		return nil, err
 	}
 	blocks := make([]models.RecentBlock, 0, len(entries))
@@ -227,8 +252,16 @@ func (a *Adapter) GetRecentTransactions(ctx context.Context, limit int) ([]model
 	if err != nil {
 		return nil, err
 	}
+	result, err := qrx.Result(raw)
+	if err != nil {
+		return nil, err
+	}
+	var resultObject map[string]json.RawMessage
+	if err := json.Unmarshal(result, &resultObject); err != nil {
+		return nil, err
+	}
 	var entries []map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &entries); err != nil {
+	if err := json.Unmarshal(resultObject["transactions"], &entries); err != nil {
 		return nil, err
 	}
 	txs := make([]models.RecentTransaction, 0, len(entries))
@@ -263,12 +296,22 @@ func (a *Adapter) GetValidatorStatus(ctx context.Context) (models.ValidatorStatu
 	if err != nil {
 		return models.ValidatorStatus{}, err
 	}
+	var staking map[string]json.RawMessage
+	_ = json.Unmarshal(fields["staking"], &staking)
+	power := qrx.Str(staking, "validator_power")
+	active := models.Unavail[bool]("validator power not present in qrx-cli response")
+	if rawPower, ok := staking["validator_power"]; ok {
+		var n int64
+		if json.Unmarshal(rawPower, &n) == nil {
+			active = models.Avail(n > 0)
+		}
+	}
 	return models.ValidatorStatus{
-		Active:         qrx.Bool(fields, "active", "is_active"),
-		Address:        qrx.Str(fields, "address", "validator_address"),
-		Stake:          qrx.Str(fields, "stake"),
-		DelegatedStake: qrx.Str(fields, "delegated_stake"),
-		VotingWeight:   qrx.Str(fields, "voting_weight"),
+		Active:         active,
+		Address:        qrx.Str(staking, "address"),
+		Stake:          qrx.Str(staking, "self_stake"),
+		DelegatedStake: qrx.Str(staking, "delegated_to_me"),
+		VotingWeight:   power,
 	}, nil
 }
 
@@ -289,8 +332,15 @@ func (a *Adapter) GetBlockProducerInfo(ctx context.Context) (models.BlockProduce
 	if err != nil {
 		return models.BlockProducerStatus{}, err
 	}
+	producerStatus := models.Unavail[string]("enabled field not present in qrx-cli response")
+	if enabled := qrx.Bool(fields, "enabled"); enabled.Ok() {
+		producerStatus = models.Avail("disabled")
+		if enabled.Value {
+			producerStatus = models.Avail("enabled")
+		}
+	}
 	return models.BlockProducerStatus{
-		ProducerStatus: qrx.Str(fields, "status", "producer_status"),
+		ProducerStatus: producerStatus,
 		BlocksProduced: qrx.Int64(fields, "blocks_produced"),
 		MissedBlocks:   qrx.Int64(fields, "missed_blocks"),
 	}, nil
@@ -305,9 +355,14 @@ func (a *Adapter) GetWalletInfo(ctx context.Context) (models.WalletSummary, erro
 	if err != nil {
 		return models.WalletSummary{}, err
 	}
+	address := qrx.Str(fields, "address")
+	loaded := qrx.Bool(fields, "loaded", "wallet_loaded")
+	if !loaded.Ok() && address.Ok() {
+		loaded = models.Avail(true)
+	}
 	return models.WalletSummary{
-		Loaded:  qrx.Bool(fields, "loaded", "wallet_loaded"),
-		Address: qrx.Str(fields, "address"),
+		Loaded:  loaded,
+		Address: address,
 		Balance: qrx.Str(fields, "balance"),
 	}, nil
 }
@@ -334,9 +389,9 @@ func (a *Adapter) GetVelocityInfo(ctx context.Context) (models.VelocityStatus, e
 		return models.VelocityStatus{}, err
 	}
 	return models.VelocityStatus{
-		EngineStatus:       qrx.Str(fields, "engine_status", "status"),
-		TransactionVersion: qrx.Str(fields, "transaction_version", "tx_version"),
-		SchedulerVersion:   qrx.Str(fields, "scheduler_version"),
+		EngineStatus:       qrx.Str(fields, "core_track", "engine_status", "status"),
+		TransactionVersion: qrx.Str(fields, "velocity_tx_version", "transaction_version", "tx_version"),
+		SchedulerVersion:   qrx.Str(fields, "parallel_execution_model", "deterministic_mempool_order", "scheduler_version"),
 		ParallelWidth:      qrx.Int(fields, "parallel_width"),
 		ExecutionWaves:     qrx.Int64(fields, "execution_waves"),
 		Conflicts:          qrx.Int64(fields, "conflicts"),
@@ -352,12 +407,26 @@ func (a *Adapter) GetNonceLanes(ctx context.Context) (models.NonceLanes, error) 
 			Lanes:     models.Unsupp[[]models.Lane](reason),
 		}, nil
 	}
-	raw, err := a.runner.Call(ctx, "getnoncelanes")
+	if a.walletAddress == "" {
+		return models.NonceLanes{
+			LaneCount: models.Unavail[int]("wallet address unavailable"),
+			Lanes:     models.Unavail[[]models.Lane]("wallet address unavailable"),
+		}, nil
+	}
+	raw, err := a.runner.Call(ctx, "getnoncelanes", a.walletAddress)
 	if err != nil {
 		return models.NonceLanes{}, err
 	}
-	var entries []map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &entries); err != nil {
+	result, resultErr := qrx.Result(raw)
+	if resultErr != nil {
+		return models.NonceLanes{}, resultErr
+	}
+	var resultObject map[string]json.RawMessage
+	if err := json.Unmarshal(result, &resultObject); err != nil {
+		return models.NonceLanes{}, err
+	}
+	var rawLanes []string
+	if err := json.Unmarshal(resultObject["lanes"], &rawLanes); err != nil {
 		// Some QRX responses may wrap lanes in an object; degrade gracefully
 		// rather than propagate a parse error the dashboard can't act on.
 		return models.NonceLanes{
@@ -365,13 +434,14 @@ func (a *Adapter) GetNonceLanes(ctx context.Context) (models.NonceLanes, error) 
 			Lanes:     models.Unavail[[]models.Lane]("unexpected getnoncelanes response shape"),
 		}, nil
 	}
-	lanes := make([]models.Lane, 0, len(entries))
-	for _, e := range entries {
-		lanes = append(lanes, models.Lane{
-			Index:     qrx.Int(e, "index").Value,
-			NextNonce: qrx.Str(e, "next_nonce").Value,
-			InFlight:  qrx.Int(e, "in_flight").Value,
-		})
+	lanes := make([]models.Lane, 0, len(rawLanes))
+	for _, rawLane := range rawLanes {
+		var index int
+		var nonce string
+		if _, err := fmt.Sscanf(rawLane, "lane=%d nonce=%s", &index, &nonce); err != nil {
+			continue
+		}
+		lanes = append(lanes, models.Lane{Index: index, NextNonce: nonce})
 	}
 	return models.NonceLanes{
 		LaneCount: models.Avail(len(lanes)),

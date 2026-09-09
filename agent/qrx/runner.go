@@ -17,6 +17,21 @@ type Runner struct {
 	cfg Config
 }
 
+// RPCError is a structured failure returned by qrxd despite a successful
+// qrx-cli process exit. Some upstream 0.0.7 builds exit zero for HTTP/RPC
+// errors, so Runner validates the response independently.
+type RPCError struct {
+	Command string
+	Message string
+}
+
+func (e *RPCError) Error() string {
+	if e.Message == "" {
+		return fmt.Sprintf("qrx-cli %s: RPC request failed", e.Command)
+	}
+	return fmt.Sprintf("qrx-cli %s: RPC request failed: %s", e.Command, e.Message)
+}
+
 // NewRunner builds a Runner for the given QRX Core connection config.
 func NewRunner(cfg Config) *Runner {
 	return &Runner{cfg: cfg}
@@ -65,13 +80,13 @@ func (e *CommandError) UnknownCommand() bool {
 func (r *Runner) baseArgs() []string {
 	var args []string
 	if r.cfg.Network != "" {
-		args = append(args, "-network="+r.cfg.Network)
+		args = append(args, "--network", r.cfg.Network)
 	}
 	if r.cfg.DataDir != "" {
-		args = append(args, "-datadir="+r.cfg.DataDir)
+		args = append(args, "--datadir", r.cfg.DataDir)
 	}
 	if r.cfg.WalletName != "" {
-		args = append(args, "-wallet="+r.cfg.WalletName)
+		args = append(args, "--wallet", r.cfg.WalletName)
 	}
 	return args
 }
@@ -110,6 +125,13 @@ func (r *Runner) Call(ctx context.Context, command string, args ...string) ([]by
 			Stderr:   stderr.String(),
 			Err:      err,
 		}
+	}
+	var envelope struct {
+		OK    *bool  `json:"ok"`
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(stdout.Bytes(), &envelope) == nil && envelope.OK != nil && !*envelope.OK {
+		return nil, &RPCError{Command: command, Message: envelope.Error}
 	}
 	return stdout.Bytes(), nil
 }

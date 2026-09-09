@@ -29,6 +29,8 @@ jobs:
           bash -n installer/linux/install.sh
           bash -n installer/linux/uninstall.sh
           bash -n installer/qrx-core-sources.sh
+          bash -n installer/build-qrx-core-linux.sh
+          bash -n installer/test/test-core-bundle.sh
           bash -n installer/test/test-detection.sh
           bash -n installer/test/test-uninstall.sh
           bash -n installer/test/gen-fixtures.sh
@@ -37,7 +39,7 @@ jobs:
         with:
           scandir: '.'
           ignore_paths: dashboard/node_modules
-          additional_files: 'install.sh installer/linux/uninstall.sh installer/qrx-core-sources.sh installer/test/test-detection.sh installer/test/test-uninstall.sh installer/test/gen-fixtures.sh'
+          additional_files: 'install.sh installer/linux/uninstall.sh installer/qrx-core-sources.sh installer/build-qrx-core-linux.sh installer/test/test-detection.sh installer/test/test-core-bundle.sh installer/test/test-uninstall.sh installer/test/gen-fixtures.sh'
 
   unit-tests:
     name: detection unit tests
@@ -58,6 +60,7 @@ jobs:
       - name: Run unit tests
         run: |
           bash installer/test/test-detection.sh
+          bash installer/test/test-core-bundle.sh
           bash installer/test/test-uninstall.sh
 
   docker-smoke-test:
@@ -144,7 +147,7 @@ jobs:
             docker exec qrx-test install -d -m 0755 -o root -g root /var/lib/qrx-node-suite/components
           fi
           docker exec \
-            -e QRX_LOCAL_TARBALL=/workspace/$(basename "$TARBALL") \
+            -e "QRX_LOCAL_TARBALL=/workspace/$(basename "$TARBALL")" \
             -e QRX_INSTALL_QRX_CORE=skip \
             -e QRX_VERBOSE=1 \
             qrx-test bash /workspace/install.sh
@@ -364,3 +367,118 @@ jobs:
       - name: Clean up
         if: always()
         run: docker rm -f qrx-test || true
+
+  core-integration:
+    name: Bundled Core install and restart
+    needs: unit-tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out pinned QRX Core 0.0.7 source
+        uses: actions/checkout@v4
+        with:
+          repository: phoenixkonsole/qrx
+          ref: 4a732c1a7d2b03fb299eabde437646c99c797e2d
+          path: qrx-core-source
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev build-essential cmake perl curl ca-certificates
+
+      - name: Cache private static OpenSSL build
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/qrx-openssl-3.6.4-amd64
+          key: qrx-openssl-3.6.4-${{ runner.os }}-amd64-9bffaa1a
+
+      - name: Build Core, Agent and Dashboard
+        env:
+          OPENSSL_PREFIX: ${{ runner.temp }}/qrx-openssl-3.6.4-amd64
+        run: |
+          installer/build-qrx-core-linux.sh qrx-core-source core-dist
+          (cd agent && go build -trimpath -ldflags '-s -w -X main.suiteVersion=0.0.0-core-ci -X main.agentVersion=0.0.0-core-ci -X main.dashboardVersion=0.0.0-core-ci' -o ../agentd ./cmd/agentd)
+          (cd dashboard && npm ci && npm run build)
+
+      - name: Package local release with Core
+        run: |
+          pkg=qrx-node-suite_0.0.0-core-ci_linux_amd64
+          mkdir -p "$pkg/dashboard" "$pkg/core"
+          cp agentd "$pkg/agentd"
+          cp -a dashboard/dist/. "$pkg/dashboard/"
+          cp -a core-dist/. "$pkg/core/"
+          cp LICENSE "$pkg/LICENSE"
+          cp installer/linux/uninstall.sh "$pkg/uninstall.sh"
+          cp installer/qrx-core-sources.sh "$pkg/qrx-core-sources.sh"
+          chmod 0755 "$pkg/agentd" "$pkg/uninstall.sh" "$pkg/qrx-core-sources.sh"
+          echo 0.0.0-core-ci >"$pkg/VERSION"
+          tarball="${pkg}.tar.gz"
+          tar -czf "$tarball" -C "$pkg" .
+          sha256sum "$tarball" >"${tarball}.sha256sums"
+          echo "TARBALL=$(pwd)/${tarball}" >>"$GITHUB_ENV"
+
+      - name: Start systemd test container
+        run: |
+          docker build --build-arg BASE_IMAGE=ubuntu:22.04 -t qrx-core-installer-test -f installer/test/docker/Dockerfile installer/test/docker
+          docker run -d --name qrx-core-test --privileged --cgroupns=host \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            -v "${{ github.workspace }}:/workspace:ro" \
+            qrx-core-installer-test
+          for _ in $(seq 1 30); do
+            docker exec qrx-core-test test -d /run/systemd/system && break
+            sleep 1
+          done
+          docker exec qrx-core-test test -d /run/systemd/system
+
+      - name: Install and verify bundled Core
+        run: |
+          docker exec \
+            -e "QRX_LOCAL_TARBALL=/workspace/$(basename "$TARBALL")" \
+            -e QRX_VERBOSE=1 \
+            qrx-core-test bash /workspace/install.sh
+          docker exec qrx-core-test systemctl is-active qrxd.service qrx-agent.service
+          docker exec qrx-core-test systemctl is-enabled qrxd.service qrx-agent.service
+          docker exec qrx-core-test curl -fsS http://127.0.0.1:8787/api/v1/version \
+            | jq -e '.qrx_core_version == "0.0.7" and .adapter_name == "qrx007"'
+          test "$(docker exec qrx-core-test stat -c '%a %U:%G' /etc/qrx-core/rpc.env)" = '600 root:root'
+          test "$(docker exec qrx-core-test stat -c '%a %U:%G' /etc/qrx-core/wallet.env)" = '600 root:root'
+          test "$(docker exec qrx-core-test stat -c '%a %U:%G' /etc/qrx-core/recovery.txt)" = '600 root:root'
+          test "$(docker exec qrx-core-test stat -c '%a %U:%G' /etc/qrx-core/recovery.qrxseed)" = '600 root:root'
+          docker exec qrx-core-test bash -c \
+            '! env -u QRX_RPC_USER -u QRX_RPC_PASSWORD /opt/qrx/current/bin/qrx-cli --network alpha getbuildinfo >/dev/null 2>&1'
+          docker exec qrx-core-test bash -c \
+            'set -a; . /etc/qrx-core/rpc.env; set +a; /opt/qrx/current/bin/qrx-cli --network alpha getbuildinfo >/dev/null'
+          docker exec qrx-core-test bash -c \
+            '! journalctl -u qrxd.service --no-pager | grep -q recovery_phrase='
+
+      - name: Verify service restart survives a daemon stop/start
+        run: |
+          docker exec qrx-core-test systemctl restart qrxd.service
+          for _ in $(seq 1 30); do
+            docker exec qrx-core-test bash -c \
+              'set -a; . /etc/qrx-core/rpc.env; set +a; /opt/qrx/current/bin/qrx-cli --network alpha getbuildinfo >/dev/null' \
+              && break
+            sleep 1
+          done
+          docker exec qrx-core-test systemctl restart qrx-agent.service
+          docker exec qrx-core-test systemctl is-active qrxd.service qrx-agent.service
+
+      - name: Container diagnostics
+        if: always()
+        run: |
+          docker exec qrx-core-test systemctl status qrxd.service qrx-agent.service --no-pager || true
+          docker exec qrx-core-test journalctl -u qrxd.service -u qrx-agent.service --no-pager || true
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f qrx-core-test || true

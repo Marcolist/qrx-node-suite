@@ -49,9 +49,9 @@ import (
 // (.github/workflows/release.yml) -- a local `go build` with no ldflags
 // keeps these development-default values.
 var (
-	suiteVersion     = "0.1.0-dev"
-	agentVersion     = "0.1.0-dev"
-	dashboardVersion = "0.1.0-dev"
+	suiteVersion     = "0.2.0-dev"
+	agentVersion     = "0.2.0-dev"
+	dashboardVersion = "0.2.0-dev"
 )
 
 const (
@@ -322,9 +322,17 @@ func run() error {
 		RestartQRXService: restartQRX, RequestSelfRestart: requestSelfRestart, Log: logger,
 	}
 
+	var coreProcessRunning func(context.Context) bool
+	if _, err := os.Stat("/etc/systemd/system/qrxd.service"); err == nil {
+		coreProcessRunning = func(checkCtx context.Context) bool {
+			state, err := svcManager.Status(checkCtx, "qrxd.service")
+			return err == nil && state == models.ServiceRunning
+		}
+	}
 	poller := &Poller{
 		Registry: registry, Monitoring: sysCollector, Cache: deps.Cache, Bus: bus,
 		Guardian: g, Alerts: alertEngine, Interval: time.Duration(cfg.Poll.NodeStatusSeconds) * time.Second, Logger: logger,
+		CoreProcessRunning: coreProcessRunning,
 	}
 	go poller.Run(ctx)
 

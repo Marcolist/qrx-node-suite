@@ -61,13 +61,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check out pinned QRX Core 0.0.7 source
+        uses: actions/checkout@v4
+        with:
+          repository: phoenixkonsole/qrx
+          ref: 4a732c1a7d2b03fb299eabde437646c99c797e2d
+          path: qrx-core-source
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
           cache: false # no go.sum exists at all (ADR-001)
 
-      - name: Install libsqlite3-dev
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev build-essential cmake perl curl ca-certificates
+
+      - name: Cache private static OpenSSL build
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/qrx-openssl-3.6.4-${{ matrix.goarch }}
+          key: qrx-openssl-3.6.4-${{ runner.os }}-${{ matrix.goarch }}-9bffaa1a
+
+      - name: Build pinned QRX Core
+        env:
+          OPENSSL_PREFIX: ${{ runner.temp }}/qrx-openssl-3.6.4-${{ matrix.goarch }}
+        run: installer/build-qrx-core-linux.sh qrx-core-source core-dist
 
       - name: Compute version
         id: version
@@ -85,8 +103,10 @@ jobs:
       - name: Verify binary architecture
         run: |
           file ./agentd
+          file ./core-dist/bin/qrxd
           [[ "${{ matrix.goarch }}" == "amd64" ]] && expect="x86-64" || expect="ARM aarch64"
           file ./agentd | grep -q "$expect" || { echo "built binary does not match expected arch $expect"; exit 1; }
+          file ./core-dist/bin/qrxd | grep -q "$expect" || { echo "Core binary does not match expected arch $expect"; exit 1; }
 
       - uses: actions/download-artifact@v4
         with:
@@ -96,7 +116,7 @@ jobs:
       - name: Package release tarball
         run: |
           pkg="qrx-node-suite_${{ steps.version.outputs.version }}_linux_${{ matrix.goarch }}"
-          mkdir -p "$pkg/dashboard"
+          mkdir -p "$pkg/dashboard" "$pkg/core"
           cp agentd "$pkg/agentd"
           chmod 0755 "$pkg/agentd"
           cp -a dashboard-dist/. "$pkg/dashboard/"
@@ -105,6 +125,7 @@ jobs:
           chmod 0755 "$pkg/uninstall.sh"
           cp installer/qrx-core-sources.sh "$pkg/qrx-core-sources.sh"
           chmod 0755 "$pkg/qrx-core-sources.sh"
+          cp -a core-dist/. "$pkg/core/"
           echo "${{ steps.version.outputs.version }}" > "$pkg/VERSION"
           # -C "$pkg" . (not `tar -czf x.tar.gz "$pkg"`) so the tarball has
           # no wrapping directory -- install.sh's install_release() expects
@@ -187,7 +208,7 @@ jobs:
 
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum *.tar.gz > SHA256SUMS
+        run: sha256sum -- *.tar.gz > SHA256SUMS
 
       # `if:` conditions here read env.RELEASE_SIGNING_PRIVATE_KEY (set at
       # job level above), never secrets.RELEASE_SIGNING_PRIVATE_KEY

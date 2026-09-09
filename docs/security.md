@@ -2,11 +2,11 @@
 
 ## Scope
 
-This document covers the OTA/update trust boundary in depth (per
-docs/updates.md#ota-security's requirement) and the hard guarantees listed
-in [`SECURITY.md`](../SECURITY.md). It does not cover QRX Core's own
-security model, which is out of scope for this project entirely (see
-docs/architecture.md's boundary rules).
+This document covers the OTA/update trust boundary, the privileged Linux
+installer, and the way the suite packages and confines QRX Core. Consensus,
+wallet cryptography and QRX protocol correctness remain Core's responsibility;
+the integration findings from the pinned 0.0.7 source are tracked separately in
+[`qrx-core-0.0.7-security-report.md`](qrx-core-0.0.7-security-report.md).
 
 ## OTA threat model
 
@@ -46,6 +46,13 @@ threat model above.
 
 | Threat | Mitigation |
 |---|---|
+| **Root tar extraction escapes the install workspace** | Before extracting the signed release as root, `validate_release_archive` rejects absolute and parent-traversal paths plus symlinks, hard links and special files. Extraction also disables archived ownership and permissions. |
+| **Substituted Core source or cryptographic dependency** | Release CI checks out the exact QRX Core commit `4a732c1a7d2b03fb299eabde437646c99c797e2d`; the build helper refuses any other commit. It downloads OpenSSL 3.6.4 over TLS, verifies its fixed SHA-256 before extraction, links it statically, and rejects a resulting `qrxd` that dynamically resolves `libcrypto` or `libssl`. The signed outer Node Suite release covers the Core binaries, the suite patch hash and embedded provenance metadata together; the target installer verifies those exact metadata values again before installation. |
+| **RPC credentials exposed in process arguments or on disk to service users** | The suite patch makes `qrxd` read `QRX_RPC_USER` and `QRX_RPC_PASSWORD` from its environment, so secrets never appear in `ExecStart` arguments. Root-owned mode-`0600` environment files are read by systemd before it changes UID. RPC binds only to `127.0.0.1`; authentication remains mandatory even there. |
+| **Wallet recovery phrase copied into the system journal or installer log** | First initialization runs before the persistent service, captures output in a private temporary file, removes the recovery line from all error output, writes the phrase and seed backup to root-only mode-`0600` files, then truncates the temporary file. `ExecStartPre` refuses to start the persistent service until the wallet exists, preventing a later automatic wallet creation from printing a phrase into journald. |
+| **Monitoring CLI mutates Core state** | The bundled Core patch removes `qrx_ensure_node()` from `qrx-cli`. Monitoring calls are RPC-only and no longer initialize chain configuration or wallet files. This also removes a reproducible first-boot race in which `qrx-cli` and `qrxd` concurrently wrote genesis state. |
+| **CLI exits zero for authentication and RPC errors** | The bundled CLI returns nonzero for `{"ok":false}` responses. The Agent independently parses the response envelope and rejects the same error even when connected to an unpatched external 0.0.7 CLI that exits zero. |
+| **Core compromise reaches the Agent or host filesystem** | Core and Agent use separate unprivileged accounts. `qrxd.service` receives a strict systemd sandbox, can write only `/var/lib/qrx`, and binds its control API to loopback. The P2P listener is public by design. |
 | **Installer log symlink attack** (a compromised, unprivileged `qrx-agent` process plants a symlink at `install.log`'s path so a later root-run `install.sh` write follows it instead of the real log file) | `QRX_LOG_DIR` is root-owned (`root:qrx-agent`, mode `0750`), not agent-writable, so `qrx-agent` can no longer place anything there at all; `setup_logging()` creates `install.log` via `init_log_file()`, which opens a file descriptor (`LOG_FD`) on a private `mktemp`-generated temp file *before* that file is ever visible at the public path, then atomically `rename(2)`s it into place -- safe against both a symlink already present and one raced into place mid-install. Critically, every `log()` call for the rest of the install writes through that same held descriptor, never by reopening `install.log`'s path -- a file descriptor is bound to the underlying inode, not the path, so a symlink planted at *any later point* (not just before the first write) can no longer redirect anything. Covers a system upgraded from an older, vulnerable installer that still has an agent-owned log directory left over from its first install. As of the fix for an external audit's F04 finding, hardened by two rounds of external re-review: R02 first closed the race between checking for a symlink and truncating through it (an atomic rename replaced that check-then-act pattern), then a second re-review found the atomic rename alone only protected the *first* write -- every later `log()` call still reopened the path each time, reproducibly exploitable, closed by moving to a held file descriptor. See `docs/installer.md#installer-log-directory`. |
 | **Installer writes as root inside the agent-owned OTA store** (a compromised `qrx-agent` replaces a release directory or target with a symlink before a later reinstall) | Release directories, binaries, and version pointers below `${QRX_DATA_DIR}/components/agent` are now created and replaced through `runuser` as `qrx-agent`; root only opens the already-verified source artifact for stdin. A malicious link can therefore reach only paths the already-compromised service account could write itself, not turn the installer into a privileged writer. The package `VERSION` is also validated before it becomes a path component. |
 | **Admin-token configuration writable by the Agent** (compromise of the web-facing service could replace its own configured bearer token and gain durable administrative access after restart) | `agent.json` is `root:qrx-agent` mode `0640`: the service can read its token and settings but cannot modify them. A reinstall also repairs ownership and mode on an existing config. Docker CI checks both the exact metadata and a write attempt as `qrx-agent`. |

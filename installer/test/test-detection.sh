@@ -135,6 +135,20 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== validate_release_archive =="
+archive_root="$(mktemp -d)"
+mkdir -p "$archive_root/safe/dashboard"
+printf 'binary\n' >"$archive_root/safe/agentd"
+printf 'html\n' >"$archive_root/safe/dashboard/index.html"
+tar -czf "$archive_root/safe.tar.gz" -C "$archive_root/safe" .
+assert_status "regular files and directories are accepted" 0 validate_release_archive "$archive_root/safe.tar.gz"
+ln -s /etc/passwd "$archive_root/safe/escape"
+tar -czf "$archive_root/link.tar.gz" -C "$archive_root/safe" .
+assert_status "symbolic links are rejected" 1 validate_release_archive "$archive_root/link.tar.gz"
+tar -czf "$archive_root/traversal.tar.gz" --transform='s|^\./|../|' -C "$archive_root/safe" . 2>/dev/null
+assert_status "parent-directory traversal is rejected" 1 validate_release_archive "$archive_root/traversal.tar.gz"
+rm -rf "$archive_root"
+
 echo "== verify_signature (real keypair round-trip) =="
 SIG_FIXTURES="${REPO_ROOT}/installer/test/fixtures/sig"
 if [[ -d "$SIG_FIXTURES" ]]; then

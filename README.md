@@ -28,8 +28,9 @@ curl -sSL https://raw.githubusercontent.com/Marcolist/qrx-node-suite/main/instal
 One command, on a fresh Linux server, Raspberry Pi, or VPS: no Go, no Node.js, no
 compiling, no manual `systemd` unit editing. It downloads a signed, checksummed
 release, installs QRX Node Suite as a systemd service under a dedicated
-unprivileged user, generates a safe default configuration, starts it, and only
-prints success once the Agent is actually healthy. Supports Ubuntu 22.04/24.04,
+unprivileged user, installs the pinned QRX Core 0.0.7 node with its statically
+linked cryptographic dependency, generates a wallet and safe default configuration, starts
+both services, and only prints success once the Agent can reach Core. Supports Ubuntu 22.04/24.04,
 Debian 12, and Raspberry Pi OS 64-bit (Pi 4/5), on x86_64 and ARM64. See
 [`docs/installer.md`](docs/installer.md) for exactly what it does, every
 environment variable, the release signing/trust model, and how to uninstall.
@@ -55,13 +56,12 @@ QRX Core -> QRX Adapter -> QRX Agent -> REST API / Event Stream / Dashboard / Gu
 
 ## Status
 
-This repository is under active development. The **version management and OTA update
-system** (component version model, compatibility matrix, adapter registry, signed update
-manifests, atomic staged updates, rollback, update history) is implemented first and in the
-most depth — see [`docs/updates.md`](docs/updates.md) and `agent/updates/`. Monitoring,
-Guardian, alerting, and Telegram integration are implemented as working skeletons intended
-to be filled in against a real QRX 0.0.7 node; see [`docs/qrx-0.0.7-interface.md`](docs/qrx-0.0.7-interface.md)
-for what is verified versus assumed.
+This repository is under active development. The one-line Linux path installs and
+monitors the pinned QRX Core 0.0.7 implementation through its verified RPC interface.
+Version management and OTA updates use signed manifests, staged activation and rollback;
+see [`docs/updates.md`](docs/updates.md). See
+[`docs/qrx-0.0.7-interface.md`](docs/qrx-0.0.7-interface.md) for the exact commands and
+response fields verified against the running Core.
 
 ## Quick start (development)
 
@@ -92,6 +92,7 @@ version switching, service restarts) are disabled unless explicitly configured �
 - [`docs/installer.md`](docs/installer.md) — one-line installer: behavior, security, env vars
 - [`docs/architecture.md`](docs/architecture.md) — layered architecture and boundary rules
 - [`docs/qrx-0.0.7-interface.md`](docs/qrx-0.0.7-interface.md) — QRX 0.0.7 interface notes (verified vs. assumed)
+- [`docs/qrx-core-0.0.7-security-report.md`](docs/qrx-core-0.0.7-security-report.md) — Core integration/security repair brief
 - [`docs/qrx-compatibility.md`](docs/qrx-compatibility.md) — compatibility matrix and profiles
 - [`docs/updates.md`](docs/updates.md) — version management and OTA update architecture
 - [`docs/guardian.md`](docs/guardian.md) — health/recovery state machine
