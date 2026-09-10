@@ -10,6 +10,28 @@ prebuilt release -- no Go toolchain, no Node.js/npm, no compilation, no manual
 `installer/linux/install.sh` remains as a lower-level helper for a developer who
 already has a compiled `agentd` binary (see `docs/deployment.md`).
 
+The installer prints an English installation guide after detecting the host. It
+shows the selected QRX network, P2P port, Core installation mode, Dashboard access
+scope, the work it is about to perform, and the operator tasks that remain after a
+successful install. The final screen gives numbered instructions for Dashboard
+login, recovery backup, firewall configuration, and checking real peer/sync state.
+
+The piped one-line form is intentionally non-interactive because standard input is
+carrying the script itself. Choose a profile by passing environment variables to
+`sudo env`, for example:
+
+```sh
+# Home server: make the Dashboard reachable on the trusted local network
+curl -sSL https://raw.githubusercontent.com/Marcolist/qrx-node-suite/main/install.sh | sudo env QRX_DASHBOARD_BIND=lan bash
+
+# VPS: advertise its assigned public IP for QRX P2P while keeping the Dashboard local
+curl -sSL https://raw.githubusercontent.com/Marcolist/qrx-node-suite/main/install.sh | sudo env QRX_CORE_EXTERNAL_HOST=203.0.113.10 bash
+```
+
+Replace the example VPS address with an address actually assigned to the server.
+For a guided review before execution, use the two-step form below and inspect or
+edit the environment options before running it.
+
 Equivalent two-step form (identical behavior, useful if you want to read the script
 before running it -- which you should, for anything piped into `sudo bash`):
 
@@ -336,7 +358,7 @@ The default command needs none of these -- they're for advanced/scripted use.
 | `QRX_REPO_OWNER` / `QRX_REPO_NAME` | `Marcolist` / `qrx-node-suite` | Where to fetch releases from -- only for forks/mirrors |
 | `QRX_LOCAL_TARBALL` | (unset) | Path to a local release tarball; skips GitHub entirely. For offline/air-gapped installs and CI testing (`installer/test/`) -- see the script's own comments. Still requires (or computes, with a warning) a checksum; never skips SHA256 verification. |
 
-Example: `curl -sSL .../install.sh | QRX_DASHBOARD_BIND=lan sudo -E bash`.
+Example: `curl -sSL .../install.sh | sudo env QRX_DASHBOARD_BIND=lan bash`.
 
 ## Supported platforms
 

@@ -73,7 +73,7 @@ QRX_TRUSTED_PUBLIC_KEY_B64="GmPkfWlATx9dN7WI6xIiPuwdjwuNktUlg7dDoy+VA5E="
 # RELEASE_SIGNING_PRIVATE_KEY, see the comment above.
 QRX_TRUSTED_MANIFEST_PUBLIC_KEY_B64="ZW2DfVIyPVog7CGBdXglLdoO9DDsqbZzvg95E1st+IM="
 
-INSTALLER_VERSION="1"
+INSTALLER_VERSION="2"
 TOTAL_STEPS=8
 STEP_NUM=0
 WORKDIR=""
@@ -131,7 +131,12 @@ step() {
 ok()   { echo "  ${COLOR_GREEN}${SYM_OK}${COLOR_RESET} $*"; log "OK: $*"; }
 warn() { echo "  ${COLOR_YELLOW}!${COLOR_RESET} $*" >&2; log "WARN: $*"; }
 info() { echo "  $*"; log "INFO: $*"; }
-verbose() { [[ "$QRX_VERBOSE" == "1" ]] && echo "    $*" || true; log "VERBOSE: $*"; }
+verbose() {
+  if [[ "$QRX_VERBOSE" == "1" ]]; then
+    echo "    $*"
+  fi
+  log "VERBOSE: $*"
+}
 
 die() {
   echo "  ${COLOR_RED}${SYM_FAIL}${COLOR_RESET} $*" >&2
@@ -307,6 +312,49 @@ print_system_summary() {
     info "Platform           ${PI_MODEL}"
   fi
   info "Init System        $([[ "$HAS_SYSTEMD" == "1" ]] && echo systemd || echo "none detected")"
+}
+
+qrx_p2p_port() {
+  local network="${1:-$QRX_CORE_NETWORK}"
+  case "$network" in
+    mainnet) echo "26660" ;;
+    alpha) echo "26661" ;;
+    testnet) echo "26662" ;;
+    regtest) echo "26663" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+print_installation_guide() {
+  local dashboard_access p2p_port
+  p2p_port="$(qrx_p2p_port)"
+  if [[ "$QRX_DASHBOARD_BIND" == "lan" ]]; then
+    dashboard_access="LAN/public interfaces on port ${QRX_LISTEN_PORT}"
+  else
+    dashboard_access="this machine only (127.0.0.1:${QRX_LISTEN_PORT})"
+  fi
+
+  echo ""
+  echo "${COLOR_BOLD}Installation guide${COLOR_RESET}"
+  echo ""
+  echo "  1. The installer checks this host and installs small runtime dependencies."
+  echo "  2. It downloads a signed release and verifies its signature and checksum."
+  echo "  3. It installs QRX Core and the Node Suite under unprivileged service users."
+  echo "  4. It creates a wallet, starts both services, and waits for a health response."
+  echo "  5. At the end, save the recovery files and the admin token shown once."
+  echo ""
+  echo "Selected setup"
+  echo "  QRX network       ${QRX_CORE_NETWORK}"
+  echo "  Core installation ${QRX_INSTALL_QRX_CORE}"
+  echo "  P2P port          ${p2p_port}/tcp"
+  echo "  Dashboard access  ${dashboard_access}"
+  if [[ "$QRX_DASHBOARD_BIND" == "lan" ]]; then
+    echo ""
+    echo "  Security notice: LAN mode uses plain HTTP unless you add a TLS reverse proxy."
+    echo "  Do not enter the admin token over an untrusted or public network."
+  fi
+  echo ""
+  echo "Advanced settings: https://github.com/${QRX_REPO_OWNER}/${QRX_REPO_NAME}/blob/main/docs/installer.md"
 }
 
 # ============================================================
@@ -1178,6 +1226,7 @@ main() {
   detect_os
   detect_ip
   print_system_summary
+  print_installation_guide
 
   step "Checking prerequisites"
   preflight
@@ -1308,6 +1357,20 @@ print_summary() {
   fi
   echo "QRX Node Suite will start automatically after reboot."
   echo "Manage it with: qrx-node-suite {status|logs|uninstall}"
+  echo ""
+  echo "Next steps"
+  echo "  1. Open the Dashboard URL shown above."
+  echo "  2. Log in with the admin token when an administrative action requires it."
+  if [[ "$QRX_CORE_RECOVERY_CREATED" == "1" ]]; then
+    echo "  3. Copy both recovery files to offline storage, verify the copies, and"
+    echo "     delete the server copies. Never paste their contents into a support chat."
+  else
+    echo "  3. Confirm that your existing wallet recovery backup is current."
+  fi
+  echo "  4. Allow inbound TCP port $(qrx_p2p_port "${QRX_CORE_NETWORK_ACTIVE:-$QRX_CORE_NETWORK}") in the host/router/provider firewall"
+  echo "     if this node should accept incoming peers. Do not expose the Core RPC port."
+  echo "  5. Run 'qrx-node-suite status' and check the Dashboard for confirmed peers"
+  echo "     and sync progress. HEALTHY means the services respond; it does not prove sync."
   echo ""
   echo "================================================"
   log "install completed successfully in $(( $(date +%s) - INSTALL_START_EPOCH ))s"

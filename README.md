@@ -34,6 +34,8 @@ both services, and only prints success once the Agent can reach Core. Supports U
 Debian 12, and Raspberry Pi OS 64-bit (Pi 4/5), on x86_64 and ARM64. See
 [`docs/installer.md`](docs/installer.md) for exactly what it does, every
 environment variable, the release signing/trust model, and how to uninstall.
+(The installer itself prints an English setup guide, the selected access profile,
+and numbered post-install steps.)
 (For a `git clone` + local build development setup instead, see
 [Quick start (development)](#quick-start-development) below.)
 

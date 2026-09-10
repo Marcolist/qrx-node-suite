@@ -89,6 +89,13 @@ assert_status "unknown arch is rejected" 1 detect_arch
 unset -f uname
 unset MOCK_UNAME_OUTPUT
 
+echo "== qrx_p2p_port =="
+assert_eq "mainnet P2P port" "26660" "$(qrx_p2p_port mainnet)"
+assert_eq "alpha P2P port" "26661" "$(qrx_p2p_port alpha)"
+assert_eq "testnet P2P port" "26662" "$(qrx_p2p_port testnet)"
+assert_eq "regtest P2P port" "26663" "$(qrx_p2p_port regtest)"
+assert_eq "unknown network has no guessed port" "unknown" "$(qrx_p2p_port invalid)"
+
 echo "== detect_os =="
 FIXTURES="${REPO_ROOT}/installer/test/fixtures"
 
