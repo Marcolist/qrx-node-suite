@@ -135,6 +135,13 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+echo "== semantic release ordering =="
+assert_status "a final release supersedes its prerelease" 0 semver_is_greater 0.2.0 0.2.0-test4
+assert_status "a prerelease does not supersede its final release" 1 semver_is_greater 0.2.0-test4 0.2.0
+assert_status "a patch release supersedes the prior final" 0 semver_is_greater 0.2.1 0.2.0
+assert_status "newer prerelease identifiers advance" 0 semver_is_greater 0.2.0-rc.2 0.2.0-rc.1
+assert_status "build metadata does not change precedence" 1 semver_is_greater 0.2.0+build.2 0.2.0+build.1
+
 echo "== validate_release_archive =="
 archive_root="$(mktemp -d)"
 mkdir -p "$archive_root/safe/dashboard"

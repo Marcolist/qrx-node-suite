@@ -588,6 +588,23 @@ prepare_ota_components_root() {
   runuser -u "$QRX_SERVICE_USER" -- chmod 0750 "$components_root"
 }
 
+semver_for_dpkg() {
+  local version="${1#v}"
+  # dpkg considers a '-' suffix newer than the bare version, opposite to
+  # SemVer prerelease ordering. Its '~' sorts before the bare version and
+  # therefore represents SemVer's '-' correctly. Build metadata is ignored.
+  version="${version%%+*}"
+  if [[ "$version" == *-* ]]; then
+    printf '%s~%s\n' "${version%%-*}" "${version#*-}"
+  else
+    printf '%s\n' "$version"
+  fi
+}
+
+semver_is_greater() {
+  dpkg --compare-versions "$(semver_for_dpkg "$1")" gt "$(semver_for_dpkg "$2")"
+}
+
 # bootstrap_agent_ota_store lays the freshly downloaded agentd binary into
 # the OTA store's own on-disk layout (agent/updates/store package:
 # <baseDir>/agent/releases/<version>/agentd, current -> releases/<version>)
@@ -649,7 +666,7 @@ bootstrap_agent_ota_store() {
       current_version="$(tr -d '[:space:]' <"$current_ptr")"
     fi
     if [[ -n "$current_version" && "$current_version" != "$version" ]] \
-      && dpkg --compare-versions "$version" gt "$current_version"; then
+      && semver_is_greater "$version" "$current_version"; then
       runuser -u "$QRX_SERVICE_USER" -- ln -sfn "releases/${current_version}" "${store_root}/.previous.new"
       runuser -u "$QRX_SERVICE_USER" -- mv -Tf "${store_root}/.previous.new" "${store_root}/previous"
       runuser -u "$QRX_SERVICE_USER" -- ln -sfn "releases/${version}" "${store_root}/.current.new"
@@ -685,7 +702,7 @@ bootstrap_dashboard_ota_store() {
   fi
 
   if [[ -n "$current_version" && "$current_version" != "$version" ]] \
-    && ! dpkg --compare-versions "$version" gt "$current_version"; then
+    && ! semver_is_greater "$version" "$current_version"; then
     warn "bundled dashboard ${version} is not newer than active dashboard ${current_version}; leaving the active version unchanged"
     return 0
   fi

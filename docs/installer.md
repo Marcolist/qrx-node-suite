@@ -78,6 +78,11 @@ effect: systemd's `ExecStart` always execs this same fixed path, and
 about running or managing the service changes because of this; it only
 matters if you're inspecting the filesystem directly.
 
+Installer release ordering follows SemVer: a final `0.2.0` supersedes
+`0.2.0-rc.1`, while build metadata such as `+build.2` does not affect
+precedence. The installer translates SemVer prerelease suffixes to dpkg's `~`
+ordering before comparing versions.
+
 ## QRX Core
 
 Official Node Suite releases include `qrx`, `qrxd`, and `qrx-cli` built from the
