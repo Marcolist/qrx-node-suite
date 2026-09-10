@@ -131,13 +131,12 @@ during install, or edit `listen_addr` in `agent.json` and `systemctl restart
 qrx-agent` afterward. `install.sh` never opens this to the wider internet and never
 touches your firewall -- see [Firewall](#firewall).
 
-Access it by IP (`http://<this-machine's-LAN-IP>:8787`, shown at the end of a
+Access it by IP (`http://<this-machine's-IP>:8787`, shown at the end of a
 `QRX_DASHBOARD_BIND=lan` install), not by hostname: `agent/api`'s
 `RequireAllowedHost` middleware rejects any request whose `Host` header
-isn't a loopback or private-network address (defense against DNS
-rebinding -- see `docs/security.md`'s F09 note), which does not include a
-custom DNS name or `.local`/mDNS hostname you may have pointed at this
-machine yourself.
+isn't a loopback/private-network address or a literal IP currently assigned to
+the server (defense against DNS rebinding -- see `docs/security.md`'s F09
+note). A custom DNS name or `.local`/mDNS hostname remains rejected.
 
 On a home server, plain HTTP is suitable only on a trusted private LAN. On a
 VPS, keep the default loopback binding and reach it through an SSH tunnel or a

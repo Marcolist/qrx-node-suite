@@ -122,10 +122,11 @@ appended to an already-large change.
   hosted anywhere on the internet, regardless of `QRX_DASHBOARD_BIND`.
   `RequireAllowedHost` (`agent/api/hostcheck.go`) now wraps the entire HTTP
   handler, including both API routes and dashboard static assets,
-  and rejects any request whose `Host` header doesn't name a loopback or
-  private-network address (RFC 1918 / link-local / `localhost`) --
-  config-free by design, since a fixed allowlist of one detected-at-install
-  IP would go stale the moment DHCP reassigns it. Origin/CORS wasn't
+  and rejects any request whose `Host` header doesn't name a loopback,
+  private-network address (RFC 1918 / link-local / `localhost`), or a literal
+  IP currently assigned to the server. This permits direct VPS-IP access while
+  still rejecting attacker-controlled DNS names, and follows address changes
+  without a fixed install-time allowlist. Origin/CORS wasn't
   separately needed: this server sends no CORS headers at all, so a
   browser already blocks a cross-origin page from reading any response,
   and the admin endpoints' required `Authorization` header forces a CORS

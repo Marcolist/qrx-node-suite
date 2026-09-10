@@ -49,9 +49,9 @@ import (
 // (.github/workflows/release.yml) -- a local `go build` with no ldflags
 // keeps these development-default values.
 var (
-	suiteVersion     = "0.2.1-dev"
-	agentVersion     = "0.2.1-dev"
-	dashboardVersion = "0.2.1-dev"
+	suiteVersion     = "0.2.2-dev"
+	agentVersion     = "0.2.2-dev"
+	dashboardVersion = "0.2.2-dev"
 )
 
 const (

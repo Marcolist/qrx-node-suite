@@ -36,10 +36,10 @@ func RequireAllowedHost(next http.Handler) http.Handler {
 }
 
 // isAllowedHost reports whether host (an HTTP request's Host header,
-// hostname optionally followed by ":port") names a loopback or
-// private-network address -- i.e. something only reachable by a client
-// already on this machine or its local network, never a public hostname a
-// DNS-rebinding attacker's page could have pointed at this server. Empty
+// hostname optionally followed by ":port") names a loopback/private address
+// or a literal IP currently assigned to this machine. The last case permits a
+// VPS operator to use the VPS's own public IP without permitting arbitrary
+// public hostnames a DNS-rebinding attacker controls. Empty
 // host is rejected (Go's net/http guarantees a non-empty Host is set from
 // the request line/Host header before a handler ever runs, so an empty
 // value here would be unexpected, not a legitimate client).
@@ -70,5 +70,25 @@ func isAllowedHost(host string) bool {
 	if ip == nil {
 		return false // a real hostname other than "localhost" -- never allowed, see doc comment
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || isLocalInterfaceIP(ip)
+}
+
+func isLocalInterfaceIP(candidate net.IP) bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		var local net.IP
+		switch value := addr.(type) {
+		case *net.IPNet:
+			local = value.IP
+		case *net.IPAddr:
+			local = value.IP
+		}
+		if local != nil && local.Equal(candidate) {
+			return true
+		}
+	}
+	return false
 }

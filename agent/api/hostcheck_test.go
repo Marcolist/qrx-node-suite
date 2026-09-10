@@ -1,6 +1,7 @@
 package api
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -39,6 +40,23 @@ func TestIsAllowedHost(t *testing.T) {
 				t.Errorf("isAllowedHost(%q) = %v, want %v", tc.host, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestIsAllowedHostAllowsAssignedInterfaceAddresses(t *testing.T) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, addr := range addrs {
+		ip, _, err := net.ParseCIDR(addr.String())
+		if err != nil || ip.IsUnspecified() {
+			continue
+		}
+		host := net.JoinHostPort(ip.String(), "8787")
+		if !isAllowedHost(host) {
+			t.Errorf("assigned interface address %q was rejected", host)
+		}
 	}
 }
 
