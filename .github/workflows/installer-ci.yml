@@ -35,11 +35,10 @@ jobs:
           bash -n installer/test/test-uninstall.sh
           bash -n installer/test/gen-fixtures.sh
       - name: shellcheck
-        uses: ludeeus/action-shellcheck@master
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38e # 2.0.0
         with:
           scandir: '.'
           ignore_paths: dashboard/node_modules
-          additional_files: 'install.sh installer/linux/uninstall.sh installer/qrx-core-sources.sh installer/build-qrx-core-linux.sh installer/test/test-detection.sh installer/test/test-core-bundle.sh installer/test/test-uninstall.sh installer/test/gen-fixtures.sh'
 
   unit-tests:
     name: detection unit tests
