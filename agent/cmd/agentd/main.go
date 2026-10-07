@@ -201,12 +201,7 @@ func run() error {
 		sudoable.SetUseSudo(cfg.QRXCoreServiceUseSudo)
 	}
 	restartQRX := func(ctx context.Context) error { return svcManager.Restart(ctx, "qrxd.service") }
-	guardianRestart := func(ctx context.Context, reason string) error { return restartQRX(ctx) }
-
-	g := guardian.New(guardian.DefaultConfig(), guardianRestart, func(old, new models.HealthState) {
-		logger.Info("guardian state transition", "from", old, "to", new)
-		bus.Publish(models.Event{Type: models.EventServiceRestarted, Timestamp: time.Now(), Data: map[string]string{"from": string(old), "to": string(new)}})
-	})
+	g := newGuardian(guardian.DefaultConfig(), restartQRX, bus, logger)
 
 	alertEngine := alerts.NewEngine(alertStore, bus, alerts.DefaultRules())
 

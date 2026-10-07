@@ -10,6 +10,7 @@ const (
 	EventNodeOnline           EventType = "node.online"
 	EventNodeOffline          EventType = "node.offline"
 	EventNodeRecovered        EventType = "node.recovered"
+	EventNodeHealthChanged    EventType = "node.health_changed"
 	EventNodeHeightChanged    EventType = "node.height_changed"
 	EventNodeSyncChanged      EventType = "node.sync_changed"
 	EventNodePeerCountChanged EventType = "node.peer_count_changed"

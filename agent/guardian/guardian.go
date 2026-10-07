@@ -18,9 +18,12 @@ import (
 // platform's ServiceStatus for qrxd) -- Guardian itself never polls QRX
 // Core or a process table directly.
 type Signals struct {
-	QRXProcessRunning  bool
-	NodeOnline         bool
-	AdapterHealthy     bool
+	QRXProcessRunning bool
+	NodeOnline        bool
+	AdapterHealthy    bool
+	// LastSuccessfulPoll is the last poll where BOTH node status was online
+	// and the adapter health probe succeeded. A successful status query alone
+	// must not reset the grace period for a persistently failing health probe.
 	LastSuccessfulPoll time.Time
 }
 
@@ -46,8 +49,8 @@ type Config struct {
 	MinRestartInterval time.Duration
 }
 
-// DefaultConfig is a reasonable starting point; every field is
-// operator-configurable (docs/configuration.md).
+// DefaultConfig is a reasonable starting point. Callers can tune Config;
+// cmd/agentd currently uses these defaults rather than JSON overrides.
 func DefaultConfig() Config {
 	return Config{
 		DegradedAfter:      30 * time.Second,
@@ -69,13 +72,15 @@ type Guardian struct {
 	state        models.HealthState
 	restartTimes []time.Time
 	lastRestart  time.Time
+	observedAt   time.Time
+	now          func() time.Time
 }
 
 // New builds a Guardian. restart is called for automatic recovery attempts;
 // onEvent (optional) is notified on every state transition (wired to
 // agent/events by cmd/agentd).
 func New(cfg Config, restart RestartFunc, onEvent func(old, new models.HealthState)) *Guardian {
-	return &Guardian{cfg: cfg, restart: restart, onEvent: onEvent, state: models.HealthOffline}
+	return &Guardian{cfg: cfg, restart: restart, onEvent: onEvent, state: models.HealthOffline, now: time.Now}
 }
 
 // State returns the current health state.
@@ -89,9 +94,13 @@ func (g *Guardian) State() models.HealthState {
 // state if it changed, and trigger an automatic restart if the new state
 // warrants one and the restart budget allows it.
 func (g *Guardian) Evaluate(ctx context.Context, s Signals) models.HealthState {
-	newState := classify(s, g.cfg, time.Now())
-
 	g.mu.Lock()
+	now := g.now()
+	firstObservation := g.observedAt.IsZero()
+	if firstObservation {
+		g.observedAt = now
+	}
+	newState := classify(s, g.cfg, now, g.observedAt)
 	old := g.state
 	changed := old != newState
 	g.state = newState
@@ -99,7 +108,7 @@ func (g *Guardian) Evaluate(ctx context.Context, s Signals) models.HealthState {
 	// process is technically still running -- a hung/unresponsive-but-alive
 	// qrxd is exactly the case an automatic restart is for, not just a
 	// crashed one.
-	shouldRestart := changed && (newState == models.HealthUnhealthy || newState == models.HealthOffline)
+	shouldRestart := (changed || firstObservation) && (newState == models.HealthUnhealthy || newState == models.HealthOffline)
 	g.mu.Unlock()
 
 	if changed && g.onEvent != nil {
@@ -111,20 +120,22 @@ func (g *Guardian) Evaluate(ctx context.Context, s Signals) models.HealthState {
 	return newState
 }
 
-func classify(s Signals, cfg Config, now time.Time) models.HealthState {
+func classify(s Signals, cfg Config, now, observedAt time.Time) models.HealthState {
 	if !s.QRXProcessRunning {
 		return models.HealthOffline
 	}
 	since := now.Sub(s.LastSuccessfulPoll)
 	if s.LastSuccessfulPoll.IsZero() {
-		since = cfg.OfflineAfter // never polled successfully yet -- treat as fully stale
+		// Give a running process time to answer its first poll. A missing
+		// sample is not proof that it has already been stale for five minutes.
+		since = now.Sub(observedAt)
 	}
 	switch {
-	case since >= cfg.OfflineAfter || !s.NodeOnline:
+	case since >= cfg.OfflineAfter:
 		return models.HealthOffline
-	case since >= cfg.UnhealthyAfter || !s.AdapterHealthy:
+	case since >= cfg.UnhealthyAfter:
 		return models.HealthUnhealthy
-	case since >= cfg.DegradedAfter:
+	case since >= cfg.DegradedAfter || !s.NodeOnline || !s.AdapterHealthy || s.LastSuccessfulPoll.IsZero():
 		return models.HealthDegraded
 	default:
 		return models.HealthHealthy
@@ -137,7 +148,7 @@ func classify(s Signals, cfg Config, now time.Time) models.HealthState {
 // restarted in an unbounded loop.
 func (g *Guardian) attemptRestart(ctx context.Context) {
 	g.mu.Lock()
-	now := time.Now()
+	now := g.now()
 	if now.Sub(g.lastRestart) < g.cfg.MinRestartInterval {
 		g.mu.Unlock()
 		return

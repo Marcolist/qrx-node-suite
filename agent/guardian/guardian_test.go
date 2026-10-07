@@ -11,9 +11,9 @@ import (
 
 func fastConfig() guardian.Config {
 	return guardian.Config{
-		DegradedAfter:      10 * time.Millisecond,
-		UnhealthyAfter:     20 * time.Millisecond,
-		OfflineAfter:       30 * time.Millisecond,
+		DegradedAfter:      10 * time.Second,
+		UnhealthyAfter:     20 * time.Second,
+		OfflineAfter:       30 * time.Second,
 		MaxAutoRestarts:    2,
 		RestartWindow:      time.Second,
 		MinRestartInterval: 0,
@@ -40,7 +40,7 @@ func TestClassifyOfflineWhenProcessNotRunning(t *testing.T) {
 
 func TestClassifyDegradesOverTime(t *testing.T) {
 	g := guardian.New(fastConfig(), nil, nil)
-	stale := time.Now().Add(-15 * time.Millisecond)
+	stale := time.Now().Add(-15 * time.Second)
 	state := g.Evaluate(context.Background(), guardian.Signals{
 		QRXProcessRunning: true, NodeOnline: true, AdapterHealthy: true, LastSuccessfulPoll: stale,
 	})
@@ -49,13 +49,13 @@ func TestClassifyDegradesOverTime(t *testing.T) {
 	}
 }
 
-func TestClassifyUnhealthyWhenAdapterUnhealthy(t *testing.T) {
+func TestClassifyDegradedWhenAdapterTemporarilyUnhealthy(t *testing.T) {
 	g := guardian.New(fastConfig(), nil, nil)
 	state := g.Evaluate(context.Background(), guardian.Signals{
 		QRXProcessRunning: true, NodeOnline: true, AdapterHealthy: false, LastSuccessfulPoll: time.Now(),
 	})
-	if state != models.HealthUnhealthy {
-		t.Errorf("state = %v, want UNHEALTHY", state)
+	if state != models.HealthDegraded {
+		t.Errorf("state = %v, want DEGRADED", state)
 	}
 }
 
@@ -71,10 +71,10 @@ func TestRestartTriggeredOnTransitionToUnhealthy(t *testing.T) {
 	g.Evaluate(context.Background(), guardian.Signals{
 		QRXProcessRunning: true, NodeOnline: true, AdapterHealthy: true, LastSuccessfulPoll: time.Now(),
 	})
-	// Transition to unhealthy (process still "running" but adapter can't
-	// reach it -- the hung-process case).
+	// Transition to unhealthy only after sustained failed polls (process
+	// still "running" but adapter can't reach it -- the hung-process case).
 	g.Evaluate(context.Background(), guardian.Signals{
-		QRXProcessRunning: true, NodeOnline: true, AdapterHealthy: false, LastSuccessfulPoll: time.Now(),
+		QRXProcessRunning: true, NodeOnline: true, AdapterHealthy: false, LastSuccessfulPoll: time.Now().Add(-25 * time.Second),
 	})
 	if restartCalls != 1 {
 		t.Errorf("restartCalls = %d, want 1", restartCalls)
