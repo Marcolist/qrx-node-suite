@@ -68,13 +68,15 @@ func (p *Poller) tick(ctx context.Context) {
 	if p.Monitoring != nil {
 		snap.System = p.Monitoring.Collect(ctx)
 	}
-	if snap.Node.Online {
-		p.lastSuccess = time.Now()
-	}
-
 	var adapterHealthy bool
 	if active != nil {
 		adapterHealthy = active.Health(ctx) == nil
+	}
+	// Guardian's grace period only resets after a fully successful liveness
+	// poll. Otherwise successful status queries could hide a health probe
+	// that fails indefinitely (or vice versa).
+	if snap.Node.Online && adapterHealthy {
+		p.lastSuccess = time.Now()
 	}
 	coreRunning := active != nil
 	if p.CoreProcessRunning != nil {
